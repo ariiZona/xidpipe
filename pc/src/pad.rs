@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! XID report decoding, presets, deadzones and button mapping.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// One OG Xbox gamepad report, decoded. +Y is up on both sticks.
@@ -37,17 +37,30 @@ pub struct Out {
     pub rt: u8,
     /// lx, ly, rx, ry (+Y up)
     pub sticks: [i16; 4],
+    /// A B X Y Black White pressure after the analog deadzone; all 0 unless `pressure` is on.
+    /// Only backends with spare axes (vJoy) use it.
+    pub pressure: [u8; 6],
 }
 
-#[derive(Deserialize, Clone, Copy, PartialEq, Debug)]
+#[derive(Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "lowercase")]
 pub enum Backend {
     Xinput,
     Dinput,
+    Vjoy,
     None,
 }
 
-#[derive(Deserialize, Clone, Debug)]
+impl Backend {
+    pub const ALL: [Backend; 4] = [
+        Backend::Xinput,
+        Backend::Dinput,
+        Backend::Vjoy,
+        Backend::None,
+    ];
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Preset {
     pub backend: Backend,
@@ -56,6 +69,8 @@ pub struct Preset {
     pub analog_deadzone: u8,
     pub left_stick_deadzone: u16,
     pub right_stick_deadzone: u16,
+    /// First vJoy device to use (backend = "vjoy")
+    pub vjoy_device: u8,
     pub map: BTreeMap<String, String>,
 }
 
@@ -69,6 +84,7 @@ impl Default for Preset {
             analog_deadzone: 30,
             left_stick_deadzone: 7849,
             right_stick_deadzone: 8689,
+            vjoy_device: 1,
             map: BTreeMap::new(),
         }
     }
@@ -142,10 +158,27 @@ const TARGETS: &[(&str, Target, &str)] = &[
     ("ry", Target::Axis(3), "ry"),
 ];
 
+/// Inputs a button or trigger output can take.
+pub const BUTTON_INPUTS: [&str; 17] = [
+    "none", "a", "b", "x", "y", "black", "white", "lt", "rt", "up", "down", "left", "right",
+    "start", "back", "ls", "rs",
+];
+/// Inputs a stick axis output can take.
+pub const AXIS_INPUTS: [&str; 5] = ["none", "lx", "ly", "rx", "ry"];
+
+/// Every output as (name, is a stick axis, default input), in display order.
+pub fn outputs() -> impl Iterator<Item = (&'static str, bool, &'static str)> {
+    TARGETS
+        .iter()
+        .map(|t| (t.0, matches!(t.1, Target::Axis(_)), t.2))
+}
+
 /// A validated preset, ready to apply to reports.
+#[derive(Clone)]
 pub struct Profile {
     pub backend: Backend,
-    pressure: bool,
+    pub vjoy_device: u8,
+    pub pressure: bool,
     press: u8,
     analog_dz: u8,
     stick_dz: [u16; 2],
@@ -161,6 +194,9 @@ impl Profile {
             if dz > 32000 {
                 return Err(format!("{k}_stick_deadzone must be 0..=32000, got {dz}"));
             }
+        }
+        if !(1..=16).contains(&p.vjoy_device) {
+            return Err(format!("vjoy_device must be 1..=16, got {}", p.vjoy_device));
         }
         if let Some(bad) = p.map.keys().find(|k| !TARGETS.iter().any(|t| t.0 == *k)) {
             return Err(format!("map: unknown output '{bad}'"));
@@ -184,6 +220,7 @@ impl Profile {
         }
         Ok(Profile {
             backend: p.backend,
+            vjoy_device: p.vjoy_device,
             pressure: p.pressure,
             press: p.press_threshold,
             analog_dz: p.analog_deadzone,
@@ -197,6 +234,9 @@ impl Profile {
         let (rx, ry) = stick(x.sticks[2], x.sticks[3], self.stick_dz[1]);
         let sticks = [lx, ly, rx, ry];
         let mut o = Out::default();
+        if self.pressure {
+            o.pressure = std::array::from_fn(|i| dz8(x.analog[i], self.analog_dz));
+        }
         for &(t, s) in &self.map {
             match t {
                 Target::Button(bit) if self.pressed(x, s) => o.buttons |= bit,
@@ -345,6 +385,31 @@ mod tests {
         assert_eq!(on.apply(&x).rt, 128);
         assert_eq!(off.apply(&x).rt, 255);
         assert_eq!(on.apply(&x).buttons & 0x1000, 0x1000); // still a digital A too
+        assert_eq!(on.apply(&x).pressure, [128, 0, 0, 0, 0, 0]);
+        assert_eq!(off.apply(&x).pressure, [0; 6]);
+    }
+
+    #[test]
+    fn preset_round_trips_through_toml() {
+        let mut p = Preset {
+            backend: Backend::Vjoy,
+            ..Preset::default()
+        };
+        p.map.insert("rt".into(), "a".into());
+        let back: Preset = toml::from_str(&toml::to_string(&p).unwrap()).unwrap();
+        assert_eq!(back, p);
+        assert!(Profile::new(&toml::from_str("vjoy_device = 0").unwrap()).is_err());
+    }
+
+    #[test]
+    fn input_lists_match_parser() {
+        for i in BUTTON_INPUTS.iter().chain(&AXIS_INPUTS) {
+            assert!(src(i).is_some(), "{i}");
+        }
+        for (name, axis, default) in outputs() {
+            let list: &[&str] = if axis { &AXIS_INPUTS } else { &BUTTON_INPUTS };
+            assert!(list.contains(&default), "{name}");
+        }
     }
 
     #[test]

@@ -5,6 +5,8 @@
 // sends it straight away. Nothing is batched or polled on a timer.
 // Reliability: every packet carries the full controller state, and the state is resent
 // every RESEND_MS even when nothing changed, so a lost packet is fixed by the next one.
+// Rumble comes back from the PC the same way (full state, resent), and stops by itself if
+// the PC goes quiet, so a lost packet or a crashed PC can't leave the motors running.
 
 #include <hal/debug.h>
 #include <hal/video.h>
@@ -18,17 +20,19 @@
 #include <hub.h>
 #include <string.h>
 
-#define XP_PORT 47100 // keep in sync with pc/src/main.rs
+#define XP_PORT 47100 // keep in sync with pc/src/engine.rs
 #define XP_VERSION 1
 #define MSG_STATE 1
 #define MSG_UNPLUGGED 2
 #define MSG_HELLO 0x10
+#define MSG_RUMBLE 0x11
 #define HEADER 14
 #define REPORT_MAX 32
 #define MAX_PADS 8
 #define RESEND_MS 50
 #define PEER_TIMEOUT_MS 3000
 #define RETRY_MS 500
+#define RUMBLE_TIMEOUT_MS 1000 // the PC resends every 250 ms
 #define XID_CLASS 0x58
 
 typedef struct {
@@ -42,6 +46,11 @@ typedef struct {
     uint8_t report[REPORT_MAX];
     uint32_t sent_gen;
     DWORD sent_at, failed_at;
+    UTR_T *out_utr;           // rumble writes; NULL if the pad has no OUT endpoint
+    volatile uint8_t out_busy;
+    uint16_t rumble[2];       // wanted: left (heavy) motor, right (light) motor
+    uint16_t rumble_sent[2];
+    DWORD rumble_seen;
 } pad_t;
 
 extern struct netif *g_pnetif;
@@ -120,6 +129,42 @@ static void on_report(UTR_T *utr)
         p->failed = 1;
     }
     KeSetEvent(&wake, 1, FALSE);
+}
+
+// Runs in the USB DPC when a rumble write finished (or failed; the next change retries).
+static void on_rumble_done(UTR_T *utr)
+{
+    ((pad_t *)utr->context)->out_busy = 0;
+    KeSetEvent(&wake, 1, FALSE);
+}
+
+static void update_rumble(pad_t *p, DWORD now)
+{
+    if (!have_peer || now - p->rumble_seen > RUMBLE_TIMEOUT_MS) {
+        p->rumble[0] = p->rumble[1] = 0;
+    }
+    if (p->out_utr == NULL || p->out_busy ||
+        (p->rumble[0] == p->rumble_sent[0] && p->rumble[1] == p->rumble_sent[1])) {
+        return;
+    }
+    // XID rumble report: id 0, length 6, left u16, right u16
+    uint8_t *b = p->out_utr->buff;
+    b[0] = 0;
+    b[1] = 6;
+    b[2] = p->rumble[0];
+    b[3] = p->rumble[0] >> 8;
+    b[4] = p->rumble[1];
+    b[5] = p->rumble[1] >> 8;
+    p->out_utr->data_len = 6;
+    p->out_utr->xfer_len = 0;
+    p->out_utr->bIsTransferDone = 0;
+    // Marked sent even if queueing fails, so a pad that rejects rumble isn't retried every loop.
+    p->rumble_sent[0] = p->rumble[0];
+    p->rumble_sent[1] = p->rumble[1];
+    p->out_busy = 1;
+    if (usbh_int_xfer(p->out_utr) != USBH_OK) {
+        p->out_busy = 0;
+    }
 }
 
 // Front panel port (1-4) of a device, 0 if unknown. Same mapping as nxdk's SDL driver.
@@ -204,6 +249,25 @@ static int xp_probe(IFACE_T *iface)
     if (usbh_int_xfer(utr) != USBH_OK) {
         p->failed = 1; // the main loop retries
     }
+
+    // Rumble is optional: some 3rd-party pads have no motors or no OUT endpoint.
+    EP_INFO_T *out_ep = usbh_iface_find_ep(iface, 0, EP_ADDR_DIR_OUT | EP_ATTR_TT_INT);
+    UTR_T *out = out_ep ? alloc_utr(udev) : NULL;
+    if (out != NULL) {
+        out->buff = usbh_alloc_mem(out_ep->wMaxPacketSize);
+        if (out->buff == NULL || out_ep->wMaxPacketSize < 6) {
+            if (out->buff != NULL) {
+                usbh_free_mem(out->buff, out_ep->wMaxPacketSize);
+            }
+            free_utr(out);
+            out = NULL;
+        } else {
+            out->context = p;
+            out->ep = out_ep;
+            out->func = on_rumble_done;
+        }
+    }
+    p->out_utr = out;
     debugPrint("Pad %u connected (%04x:%04x, XID type %02x)\n", p->id, p->vid, p->pid, type);
     return USBH_OK;
 }
@@ -225,6 +289,12 @@ static void xp_disconnect(IFACE_T *iface)
     KfLowerIrql(irql);
     usbh_free_mem(p->utr->buff, p->utr->ep->wMaxPacketSize);
     free_utr(p->utr);
+    if (p->out_utr != NULL) {
+        usbh_quit_utr(p->out_utr);
+        usbh_free_mem(p->out_utr->buff, p->out_utr->ep->wMaxPacketSize);
+        free_utr(p->out_utr);
+        p->out_utr = NULL;
+    }
     iface->context = NULL;
 
     send_pad(p, MSG_UNPLUGGED);
@@ -251,13 +321,14 @@ static void retry_read(pad_t *p, DWORD now)
     }
 }
 
-static void poll_hello(DWORD now)
+static void poll_net(DWORD now)
 {
     uint8_t b[16];
     struct sockaddr_in from;
     socklen_t from_len = sizeof(from);
 
-    while (lwip_recvfrom(sock, b, sizeof(b), MSG_DONTWAIT, (struct sockaddr *)&from, &from_len) >= 4) {
+    int n;
+    while ((n = lwip_recvfrom(sock, b, sizeof(b), MSG_DONTWAIT, (struct sockaddr *)&from, &from_len)) >= 4) {
         if (b[0] == 'X' && b[1] == 'P' && b[2] == XP_VERSION && b[3] == MSG_HELLO) {
             if (!have_peer || from.sin_addr.s_addr != peer.sin_addr.s_addr || from.sin_port != peer.sin_port) {
                 debugPrint("PC connected: %s\n", ip4addr_ntoa((const ip4_addr_t *)&from.sin_addr));
@@ -265,6 +336,16 @@ static void poll_hello(DWORD now)
             peer = from;
             have_peer = 1;
             peer_seen = now;
+        } else if (n >= 9 && b[0] == 'X' && b[1] == 'P' && b[2] == XP_VERSION && b[3] == MSG_RUMBLE &&
+                   have_peer && from.sin_addr.s_addr == peer.sin_addr.s_addr && from.sin_port == peer.sin_port) {
+            // Only the PC we stream to may drive the motors.
+            for (int i = 0; i < MAX_PADS; i++) {
+                if (pads[i].iface != NULL && pads[i].id == b[4]) {
+                    pads[i].rumble[0] = b[5] | b[6] << 8;
+                    pads[i].rumble[1] = b[7] | b[8] << 8;
+                    pads[i].rumble_seen = now;
+                }
+            }
         }
         from_len = sizeof(from);
     }
@@ -316,7 +397,7 @@ int main(void)
 
         usbh_pooling_hubs();
         DWORD now = GetTickCount();
-        poll_hello(now);
+        poll_net(now);
 
         for (int i = 0; i < MAX_PADS; i++) {
             pad_t *p = &pads[i];
@@ -329,6 +410,7 @@ int main(void)
             if (p->len && (p->gen != p->sent_gen || now - p->sent_at >= RESEND_MS)) {
                 send_pad(p, MSG_STATE);
             }
+            update_rumble(p, now);
         }
     }
 }

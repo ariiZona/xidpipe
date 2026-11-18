@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Virtual controller backends.
 
-use crate::pad::{Backend, Out};
+use crate::pad::{Backend, Out, Profile};
 
 pub trait Output {
     fn send(&mut self, o: &Out) -> Result<(), String>;
+    /// New rumble level (left/heavy motor, right/light motor) if the game changed it.
+    fn rumble(&mut self) -> Option<(u16, u16)> {
+        None
+    }
 }
 
 struct Null;
@@ -14,16 +18,34 @@ impl Output for Null {
     }
 }
 
-pub fn open(b: Backend) -> Result<Box<dyn Output>, String> {
-    match b {
+/// Create the virtual controller for Xbox pad `pad` (1-12).
+pub fn open(p: &Profile, pad: u8) -> Result<Box<dyn Output>, String> {
+    match p.backend {
         Backend::None => Ok(Box::new(Null)),
-        _ => imp::open(b),
+        #[cfg(windows)]
+        Backend::Vjoy => crate::vjoy::open(p, pad),
+        #[cfg(not(windows))]
+        Backend::Vjoy => Err(format!("pad {pad}: vJoy is Windows-only")),
+        b => imp::open(b),
     }
+}
+
+/// Backends this OS supports, for the GUI.
+pub fn available() -> Vec<Backend> {
+    Backend::ALL
+        .into_iter()
+        .filter(|b| match b {
+            Backend::None => true,
+            Backend::Vjoy => cfg!(windows),
+            _ => cfg!(any(windows, target_os = "linux")),
+        })
+        .collect()
 }
 
 #[cfg(windows)]
 mod imp {
     use super::*;
+    use std::sync::mpsc;
     use vigem_client::{
         Client, DS4Report, DualShock4Wired, TargetId, XButtons, XGamepad, Xbox360Wired,
     };
@@ -37,17 +59,26 @@ mod imp {
             t.plugin()
                 .and_then(|_| t.wait_ready())
                 .map_err(|e| format!("ViGEm DS4: {e:?}"))?;
-            Ok(Box::new(Ds4(t)))
-        } else {
-            let mut t = Xbox360Wired::new(client, TargetId::XBOX360_WIRED);
-            t.plugin()
-                .and_then(|_| t.wait_ready())
-                .map_err(|e| format!("ViGEm X360: {e:?}"))?;
-            Ok(Box::new(X360(t)))
+            return Ok(Box::new(Ds4(t)));
         }
+        let mut t = Xbox360Wired::new(client, TargetId::XBOX360_WIRED);
+        t.plugin()
+            .and_then(|_| t.wait_ready())
+            .map_err(|e| format!("ViGEm X360: {e:?}"))?;
+        // The notification thread ends by itself when the target is unplugged (dropped).
+        let (tx, rumble) = mpsc::channel();
+        t.request_notification()
+            .map_err(|e| format!("ViGEm X360 rumble: {e:?}"))?
+            .spawn_thread(move |_, n| {
+                let _ = tx.send((n.large_motor as u16 * 257, n.small_motor as u16 * 257));
+            });
+        Ok(Box::new(X360 { t, rumble }))
     }
 
-    struct X360(Xbox360Wired<Client>);
+    struct X360 {
+        t: Xbox360Wired<Client>,
+        rumble: mpsc::Receiver<(u16, u16)>,
+    }
     impl Output for X360 {
         fn send(&mut self, o: &Out) -> Result<(), String> {
             let [lx, ly, rx, ry] = o.sticks;
@@ -60,10 +91,15 @@ mod imp {
                 thumb_rx: rx,
                 thumb_ry: ry,
             };
-            self.0.update(&g).map_err(|e| format!("{e:?}"))
+            self.t.update(&g).map_err(|e| format!("{e:?}"))
+        }
+        fn rumble(&mut self) -> Option<(u16, u16)> {
+            self.rumble.try_iter().last()
         }
     }
 
+    // shortcut: no DS4 rumble; vigem-client keeps the DS4 serial number private, so its
+    // notification IOCTL is unreachable. Needs a vigem-client patch or our own bus code.
     struct Ds4(DualShock4Wired<Client>);
     impl Output for Ds4 {
         fn send(&mut self, o: &Out) -> Result<(), String> {
@@ -96,17 +132,7 @@ mod imp {
             buttons |= 1 << 11
         }
         // Hat: 0 = N, clockwise to 7 = NW, 8 = released.
-        buttons |= match (on(0x0001), on(0x0002), on(0x0004), on(0x0008)) {
-            (true, _, false, true) => 1,
-            (true, _, true, _) => 7,
-            (true, _, _, _) => 0,
-            (_, true, false, true) => 3,
-            (_, true, true, _) => 5,
-            (_, true, _, _) => 4,
-            (_, _, false, true) => 2,
-            (_, _, true, _) => 6,
-            _ => 8,
-        };
+        buttons |= crate::vjoy::hat8(o.buttons).map_or(8, u16::from);
         DS4Report {
             thumb_lx: u8x(o.sticks[0]),
             thumb_ly: u8y(o.sticks[1]),
@@ -124,8 +150,8 @@ mod imp {
         let r = ds4(&Out {
             buttons: 0x1000 | 0x0001 | 0x0008,
             lt: 9,
-            rt: 0,
             sticks: [0, 32767, -32768, 0],
+            ..Out::default()
         });
         assert_eq!(r.buttons, 1 << 5 | 1 << 10 | 1);
         assert_eq!(
@@ -141,9 +167,12 @@ mod imp {
     use super::*;
     use evdev::uinput::VirtualDevice;
     use evdev::{
-        AbsInfo, AbsoluteAxisCode as Abs, AttributeSet, BusType, EventType, InputEvent, InputId,
-        KeyCode, UinputAbsSetup,
+        AbsInfo, AbsoluteAxisCode as Abs, AttributeSet, BusType, EventSummary, EventType,
+        FFEffectCode, FFEffectKind, InputEvent, InputId, KeyCode, UInputCode, UinputAbsSetup,
     };
+    use std::collections::HashMap;
+    use std::os::fd::AsRawFd;
+    use std::time::{Duration, Instant};
 
     // Same codes as the kernel's xpad driver, so SDL/Steam/Wine treat "xinput" as a real 360 pad.
     // (xpad reports X as BTN_NORTH and Y as BTN_WEST.)
@@ -186,19 +215,43 @@ mod imp {
             let mut d = VirtualDevice::builder()?
                 .name(name)
                 .input_id(InputId::new(BusType::BUS_USB, vid, pid, 0x0110))
-                .with_keys(&keys)?;
+                .with_keys(&keys)?
+                .with_ff(&AttributeSet::from_iter([FFEffectCode::FF_RUMBLE]))?
+                .with_ff_effects_max(16);
             for (code, info) in axes {
                 d = d.with_absolute_axis(&UinputAbsSetup::new(code, info))?;
             }
-            d.build()
+            let dev = d.build()?;
+            // Rumble requests are polled from the network loop, which must never block on them.
+            let fd = dev.as_raw_fd();
+            unsafe {
+                let flags = libc::fcntl(fd, libc::F_GETFL);
+                if flags < 0 || libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(dev)
         };
         let dev = build().map_err(|e| {
             format!("uinput: {e} (need write access to /dev/uinput, see README: Linux permissions)")
         })?;
-        Ok(Box::new(Uinput(dev)))
+        Ok(Box::new(Uinput {
+            dev,
+            effects: HashMap::new(),
+            playing: HashMap::new(),
+            last: (0, 0),
+        }))
     }
 
-    struct Uinput(VirtualDevice);
+    struct Uinput {
+        dev: VirtualDevice,
+        /// effect id -> (strong, weak magnitude, length ms; 0 = until stopped)
+        effects: HashMap<u16, (u16, u16, u16)>,
+        /// effect id -> when it stops by itself
+        playing: HashMap<u16, Option<Instant>>,
+        last: (u16, u16),
+    }
+
     impl Output for Uinput {
         fn send(&mut self, o: &Out) -> Result<(), String> {
             let abs = |c: Abs, v: i32| InputEvent::new(EventType::ABSOLUTE.0, c.0, v);
@@ -218,7 +271,66 @@ mod imp {
                 abs(Abs::ABS_HAT0X, on(0x0008) as i32 - on(0x0004) as i32),
                 abs(Abs::ABS_HAT0Y, on(0x0002) as i32 - on(0x0001) as i32),
             ]);
-            self.0.emit(&ev).map_err(|e| e.to_string())
+            self.dev.emit(&ev).map_err(|e| e.to_string())
+        }
+
+        fn rumble(&mut self) -> Option<(u16, u16)> {
+            let now = Instant::now();
+            // WouldBlock (nothing queued) and other read errors both just mean "no new requests".
+            let events: Vec<InputEvent> = self
+                .dev
+                .fetch_events()
+                .map(|it| it.collect())
+                .unwrap_or_default();
+            for ev in events {
+                match ev.destructure() {
+                    EventSummary::UInput(e, UInputCode::UI_FF_UPLOAD, ..) => {
+                        if let Ok(mut up) = self.dev.process_ff_upload(e) {
+                            let d = up.effect();
+                            let (s, w) = match d.kind {
+                                FFEffectKind::Rumble {
+                                    strong_magnitude,
+                                    weak_magnitude,
+                                } => (strong_magnitude, weak_magnitude),
+                                _ => (0, 0),
+                            };
+                            // The kernel already picked the effect id; keep it.
+                            self.effects
+                                .insert(up.effect_id() as u16, (s, w, d.replay.length));
+                            up.set_retval(0);
+                        }
+                    }
+                    EventSummary::UInput(e, UInputCode::UI_FF_ERASE, ..) => {
+                        if let Ok(er) = self.dev.process_ff_erase(e) {
+                            let id = er.effect_id() as u16;
+                            self.effects.remove(&id);
+                            self.playing.remove(&id);
+                        }
+                    }
+                    EventSummary::ForceFeedback(_, code, value) => {
+                        if value > 0 {
+                            if let Some(&(_, _, len)) = self.effects.get(&code.0) {
+                                let end =
+                                    (len > 0).then(|| now + Duration::from_millis(len as u64));
+                                self.playing.insert(code.0, end);
+                            }
+                        } else {
+                            self.playing.remove(&code.0);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            self.playing.retain(|_, end| end.is_none_or(|e| now < e));
+            let level = self
+                .playing
+                .keys()
+                .filter_map(|id| self.effects.get(id))
+                .fold((0, 0), |a, e| (a.0.max(e.0), a.1.max(e.1)));
+            (level != self.last).then(|| {
+                self.last = level;
+                level
+            })
         }
     }
 }
@@ -227,9 +339,13 @@ mod imp {
 mod imp {
     use super::*;
     pub fn open(_: Backend) -> Result<Box<dyn Output>, String> {
-        Err(
-            "no virtual controller support on this OS yet; use backend = \"none\" with --monitor"
-                .into(),
-        )
+        Err("no virtual controller support on this OS yet; use backend = \"none\"".into())
     }
+}
+
+#[test]
+fn backends_per_os() {
+    let a = available();
+    assert!(a.contains(&Backend::None));
+    assert_eq!(a.contains(&Backend::Vjoy), cfg!(windows));
 }
