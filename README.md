@@ -18,7 +18,7 @@ OG controller --USB--> Xbox (xbox/, nxdk homebrew) --UDP, LAN--> PC (pc/, Rust) 
 
 **Tested on real hardware so far:** one 3rd-party Pelican pad (reports itself as `ffff:ffff`, rejected by
 XBlast OS and Gentoox) on Windows, playing through xemu and xbased. The Xbox app's FTP server and update
-check (new in v0.2.0) haven't been tested on hardware yet. Everything else is only built and unit-tested by CI.
+check (new in v0.2) haven't been tested on hardware yet. Everything else is only built and unit-tested by CI.
 
 ## What you need
 
@@ -68,8 +68,8 @@ From then on the Xbox app keeps itself up to date (see [Updating the Xbox app](#
 - **Command line:** run without a window, with a preset.
 - **Self-updating Xbox app:** on start it checks GitHub for a newer release and downloads it. You install
   it with the controller, and xidpipe restarts into it.
-- **Built-in FTP server** on the Xbox, for xidpipe's own folder, so you can swap files without going back
-  to the dashboard. Uploading a new `default.xbe` installs it and restarts.
+- **Built-in FTP server** on the Xbox, like a dashboard's: user `xbox`, password `xbox`, every drive.
+  Copy files to and from the Xbox while xidpipe runs. Uploading a new `default.xbe` installs it and restarts.
 - **Several controllers:** each one gets its own virtual controller. Pads on the four front ports are
   numbered 1–4 by port; other Xbox-protocol devices (for example behind an extra hub) get 5 and up.
   The Xbox app handles up to 8.
@@ -117,10 +117,20 @@ The Xbox needs internet access for this; without it, the screen says the check f
 works as usual. An update is only installed after the download has completed and looks like a valid XBE,
 and the old XBE is kept until the new one is in place.
 
-**FTP server.** While it runs, the Xbox app serves its own folder over FTP on port 21: any user name and
-password, passive mode (FileZilla's default). It can't reach anything outside that folder. Uploading a new
-copy of the running XBE (normally `default.xbe`) checks it, installs it the same safe way, and restarts
-xidpipe. Other files are saved as they are. You can't delete or rename the running XBE, only replace it.
+**FTP server.** While it runs, the Xbox app is an FTP server for the whole Xbox, the way dashboards are
+(modelled on [xemu-dashboard](https://github.com/xemu-project/xemu-dashboard)'s):
+
+- port 21, user **`xbox`**, password **`xbox`**, passive mode (FileZilla's default), several connections at once;
+- `/` lists the drives: `C` (system), `D` (DVD), `E` (data, where apps and saves live), `F` and `G` (extra
+  partitions on big drives), `X` `Y` `Z` (cache). Only drives that can be read right now are shown, so an
+  empty DVD tray or a missing F/G simply isn't listed. `/E/Apps` is `E:\Apps`;
+- uploads are buffered and written in the background, like xemu-dashboard does, to keep transfers fast;
+- an upload only replaces a file once it has arrived completely; a cut-off transfer changes nothing;
+- uploading a new copy of the running XBE (normally `default.xbe` in xidpipe's folder) checks it, installs
+  it the same safe way as an update, and restarts xidpipe. You can't delete or rename the running XBE.
+
+Like any Xbox FTP server it can change everything, including `C:` with the dashboard and system files.
+Be careful there.
 
 **Turning them off.** Create an empty file in xidpipe's folder on the Xbox:
 
@@ -129,10 +139,11 @@ xidpipe. Other files are saved as they are. You can't delete or rename the runni
 | `no-update-check` | no update check (the Xbox never contacts GitHub) |
 | `no-ftp` | no FTP server |
 
-Anyone on your network can use the FTP server while xidpipe runs, so use `no-ftp` on networks you don't trust.
+Anyone on your network who knows `xbox`/`xbox` (every Xbox FTP server uses it) can use the FTP server while
+xidpipe runs, so use `no-ftp` on networks you don't trust.
 
-**Coming from v0.1.x:** those versions have neither feature, so install v0.2.0 the usual way, with your
-dashboard's FTP. After that, updates come by themselves.
+**Coming from v0.1.x:** those versions have neither feature, so install v0.2.1 (or newer) the usual way,
+with your dashboard's FTP. After that, updates come by themselves.
 
 The update check reads [GitHub's latest release](https://github.com/ariiZona/xidpipe/releases/latest)
 and downloads its `xidpipe-vX.Y.Z-default.xbe` asset. Forks can point it at their own repository:

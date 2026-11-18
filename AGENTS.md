@@ -19,9 +19,9 @@ Two programs that talk over UDP:
 | path | role |
 |---|---|
 | `xbox/main.c` | Xbox app core: USB probe/driver, DPC callbacks, lwIP UDP, polling, rumble, update prompt, `say()` |
-| `xbox/ftp.c` | FTP server for the XBE's own folder (own thread) |
+| `xbox/ftp.c` | dashboard-style FTP server for all drives, xbox/xbox (modelled on xemu-dashboard's; one thread per client) |
 | `xbox/update.c` | update check and download over HTTPS with BearSSL (own thread) |
-| `xbox/util.c` | platform-free helpers (HTTP/JSON parsing, version compare, FTP path sandbox), unit-tested |
+| `xbox/util.c` | platform-free helpers (HTTP/JSON parsing, version compare, FTP path mapping), unit-tested |
 | `xbox/tests/util_test.c` | host-side tests for `util.c` |
 | `xbox/roots.h` | root certificates the update check trusts |
 | `xbox/xidpipe.h` | declarations shared by the Xbox app's files |
@@ -84,7 +84,10 @@ Add a decode/encode test in `engine.rs` for any new or changed message.
 - Only the PC the Xbox streams to may drive rumble.
 - The Xbox app never replaces its own XBE with anything that isn't a complete, valid-looking XBE, and keeps
   the old one until the new one is in place (`install_xbe`). Updates install only after the user holds A.
-  The FTP server stays inside the XBE's folder (`ftp_resolve`, which has tests); keep it that way.
+  FTP paths go through `ftp_resolve` (tested): only drive letters under `/`, no `:` tricks, `..` stops at `/`.
+  FTP uploads replace a file only once complete (`.part` first), and the running XBE can't be deleted or renamed.
+- Drive letters follow the dashboard layout (C E F G X Y Z on the disk, D = DVD); xidpipe's own folder is Q:.
+  Use Q: (via `self_xbe_path()`), not D:, for files next to the XBE.
 - Certificates are verified against `roots.h`. Never turn verification off to make a download work.
 
 **3rd-party controllers are a first-class target.** Never require an XID descriptor, specific VID/PID or

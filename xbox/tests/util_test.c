@@ -66,21 +66,30 @@ static void test_dates(void)
 static void test_resolve(void)
 {
     char ftp[XP_PATH_MAX], dos[XP_PATH_MAX];
-    CHECK(ftp_resolve("/", "default.xbe", ftp, dos) && !strcmp(ftp, "/default.xbe") && !strcmp(dos, "D:\\default.xbe"));
-    CHECK(ftp_resolve("/", ".", ftp, dos) && !strcmp(ftp, "/") && !strcmp(dos, "D:\\"));
-    CHECK(ftp_resolve("/a/b", "../c", ftp, dos) && !strcmp(ftp, "/a/c") && !strcmp(dos, "D:\\a\\c"));
-    CHECK(ftp_resolve("/a", "/x/./y//z", ftp, dos) && !strcmp(ftp, "/x/y/z"));
-    // Can't climb out of the folder, however it's written
-    CHECK(ftp_resolve("/", "../../../windows", ftp, dos) && !strcmp(dos, "D:\\windows"));
-    CHECK(ftp_resolve("/a", "..\\..\\..\\x", ftp, dos) && !strcmp(dos, "D:\\x"));
-    // No other drives or alternate streams
-    CHECK(!ftp_resolve("/", "C:\\xboxdash.xbe", ftp, dos));
-    CHECK(!ftp_resolve("/", "/E:/apps", ftp, dos));
-    CHECK(!ftp_resolve("/", "file.txt:stream", ftp, dos));
+    // "/" is the list of drives; "/E/..." is a path on E:
+    CHECK(ftp_resolve("/", ".", ftp, dos) == FTP_ROOT && !strcmp(ftp, "/"));
+    CHECK(ftp_resolve("/", "E/Apps", ftp, dos) == FTP_PATH && !strcmp(ftp, "/E/Apps") && !strcmp(dos, "E:\\Apps"));
+    CHECK(ftp_resolve("/", "e", ftp, dos) == FTP_PATH && !strcmp(ftp, "/E") && !strcmp(dos, "E:\\"));
+    CHECK(ftp_resolve("/E/a/b", "../c", ftp, dos) == FTP_PATH && !strcmp(ftp, "/E/a/c") && !strcmp(dos, "E:\\a\\c"));
+    CHECK(ftp_resolve("/E/x", "/C/xboxdash.xbe", ftp, dos) == FTP_PATH && !strcmp(dos, "C:\\xboxdash.xbe"));
+    CHECK(ftp_resolve("/E", "/F/./y//z", ftp, dos) == FTP_PATH && !strcmp(ftp, "/F/y/z"));
+    // ".." stops at the drive list, however it's written
+    CHECK(ftp_resolve("/E", "..", ftp, dos) == FTP_ROOT);
+    CHECK(ftp_resolve("/", "../../..", ftp, dos) == FTP_ROOT);
+    CHECK(ftp_resolve("/E/a", "..\\..\\..\\C\\x", ftp, dos) == FTP_PATH && !strcmp(dos, "C:\\x"));
+    // The first part must be one drive letter
+    CHECK(ftp_resolve("/", "Apps", ftp, dos) == FTP_BAD);
+    CHECK(ftp_resolve("/", "/EE/x", ftp, dos) == FTP_BAD);
+    CHECK(ftp_resolve("/", "/1/x", ftp, dos) == FTP_BAD);
+    // No "C:" forms or alternate streams
+    CHECK(ftp_resolve("/", "C:\\xboxdash.xbe", ftp, dos) == FTP_BAD);
+    CHECK(ftp_resolve("/E", "file.txt:stream", ftp, dos) == FTP_BAD);
     char longname[400];
     memset(longname, 'a', sizeof(longname) - 1);
+    longname[0] = 'E';
+    longname[1] = '/';
     longname[sizeof(longname) - 1] = 0;
-    CHECK(!ftp_resolve("/", longname, ftp, dos));
+    CHECK(ftp_resolve("/", longname, ftp, dos) == FTP_BAD);
 }
 
 int main(void)

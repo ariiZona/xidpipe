@@ -13,6 +13,7 @@
 #include <hal/debug.h>
 #include <hal/video.h>
 #include <hal/xbox.h>
+#include <nxdk/mount.h>
 #include <nxdk/path.h>
 #include <windows.h>
 #include <xboxkrnl/xboxkrnl.h>
@@ -75,7 +76,8 @@ static pad_t pads[MAX_PADS];
 static uint32_t seqs[16]; // per pad id; never reset, so the PC can drop stale packets
 static KEVENT wake;
 static CRITICAL_SECTION screen_lock;
-static char self_path[MAX_PATH]; // "D:\default.xbe" (D: is the XBE's own folder)
+static char self_path[MAX_PATH]; // "Q:\default.xbe" (Q: is the XBE's own folder)
+static char self_real[MAX_PATH]; // the same file on its real drive, e.g. "E:\Apps\xidpipe\default.xbe"
 static ULONGLONG perf_hz;
 static uint8_t poll_ms;   // applied polling setting from the PC: 0 = auto, else 1/2/4/8 ms
 
@@ -118,13 +120,59 @@ const char *self_xbe_path(void)
 
 const char *self_xbe_name(void)
 {
-    return self_path + 3; // after "D:\"
+    return self_path + 3; // after "Q:\"
+}
+
+const char *self_xbe_real_path(void)
+{
+    return self_real;
+}
+
+// The drive letters Xbox dashboards use (same layout as xemu-dashboard). F and G only exist on
+// big, extra-partitioned drives; D is the DVD drive.
+static const struct {
+    char letter;
+    const char *device;
+} drives[] = {
+    {'C', "\\Device\\Harddisk0\\Partition2"}, {'E', "\\Device\\Harddisk0\\Partition1"},
+    {'F', "\\Device\\Harddisk0\\Partition6"}, {'G', "\\Device\\Harddisk0\\Partition7"},
+    {'X', "\\Device\\Harddisk0\\Partition3"}, {'Y', "\\Device\\Harddisk0\\Partition4"},
+    {'Z', "\\Device\\Harddisk0\\Partition5"}, {'D', "\\Device\\CdRom0"},
+};
+
+// Mount the drives for the FTP server, and xidpipe's own folder as Q:. nxdk mounts the XBE's
+// folder as D:, but dashboards use D: for the DVD drive, so it's moved.
+static void mount_drives(void)
+{
+    char nt[MAX_PATH];
+    nxGetCurrentXbeNtPath(nt);
+    char *slash = strrchr(nt, '\\');
+    snprintf(self_path, sizeof(self_path), "Q:\\%s", slash ? slash + 1 : "default.xbe");
+    if (slash) {
+        slash[1] = 0;
+        nxMountDrive('Q', nt);
+    }
+    nxUnmountDrive('D');
+    for (size_t i = 0; i < sizeof(drives) / sizeof(drives[0]); i++) {
+        char path[MAX_PATH];
+        snprintf(path, sizeof(path), "%s%s", drives[i].device, drives[i].letter == 'D' ? "" : "\\");
+        nxMountDrive(drives[i].letter, path);
+    }
+
+    // Where the running XBE is on those drives, so the FTP server can protect it.
+    nxGetCurrentXbeNtPath(nt);
+    for (size_t i = 0; i < sizeof(drives) / sizeof(drives[0]); i++) {
+        size_t n = strlen(drives[i].device);
+        if (_strnicmp(nt, drives[i].device, n) == 0 && nt[n] == '\\') {
+            snprintf(self_real, sizeof(self_real), "%c:%s", drives[i].letter, nt + n);
+        }
+    }
 }
 
 int marker_exists(const char *name)
 {
     char path[MAX_PATH];
-    snprintf(path, sizeof(path), "D:\\%s", name);
+    snprintf(path, sizeof(path), "Q:\\%s", name);
     return GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
 }
 
@@ -538,12 +586,7 @@ int main(void)
 
     XVideoSetMode(640, 480, 32, REFRESH_DEFAULT);
     InitializeCriticalSection(&screen_lock);
-    {
-        char nt[MAX_PATH];
-        nxGetCurrentXbeNtPath(nt);
-        const char *name = strrchr(nt, '\\');
-        snprintf(self_path, sizeof(self_path), "D:\\%s", name ? name + 1 : "default.xbe");
-    }
+    mount_drives();
     say("xidpipe v" XIDPIPE_VERSION "\n\nStarting network...\n");
 
     if (nxNetInit(NULL) != 0) {

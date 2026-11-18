@@ -25,9 +25,11 @@ int version_newer(const char *tag, const char *mine);
 // Unix time of a date in __DATE__ format ("Nov 18 2026"), at midnight UTC.
 int64_t date_to_unix(const char *date);
 
-// Resolve FTP path `arg` (absolute, or relative to folder `cwd`) to a normalised FTP path and a
-// DOS path on D:. Handles "." and ".."; never climbs above the root; rejects ':' (drives,
-// streams). Both outputs are XP_PATH_MAX bytes. Returns 1 on success.
+// Map FTP path `arg` (absolute, or relative to folder `cwd`) onto the Xbox's drives the way Xbox
+// dashboards do: "/" is the list of drives, "/E/Apps" is "E:\Apps". "." and ".." are resolved
+// and stop at "/"; the first part must be a single drive letter; ':' is rejected (no "C:" tricks
+// or alternate streams). Both outputs are XP_PATH_MAX bytes.
+enum { FTP_BAD = 0, FTP_PATH = 1, FTP_ROOT = 2 };
 int ftp_resolve(const char *cwd, const char *arg, char *ftp_out, char *dos_out);
 
 #endif

@@ -127,7 +127,7 @@ int ftp_resolve(const char *cwd, const char *arg, char *ftp_out, char *dos_out)
 {
     char in[2 * XP_PATH_MAX];
     snprintf(in, sizeof(in), "%s/%s", arg[0] == '/' ? "" : cwd, arg);
-    char norm[XP_PATH_MAX - 8]; // room left for "D:" and a ".part" suffix
+    char norm[XP_PATH_MAX - 8]; // room left for a ".part" suffix
     size_t nl = 0;
     const char *p = in;
     while (*p) {
@@ -151,21 +151,34 @@ int ftp_resolve(const char *cwd, const char *arg, char *ftp_out, char *dos_out)
             }
             continue;
         }
-        // No drive letters or streams.
         if (memchr(start, ':', len) != NULL || nl + 1 + len >= sizeof(norm)) {
-            return 0;
+            return FTP_BAD;
         }
         norm[nl++] = '/';
         memcpy(norm + nl, start, len);
         nl += len;
     }
     norm[nl] = 0;
-    snprintf(ftp_out, XP_PATH_MAX, "%s", nl ? norm : "/");
-    snprintf(dos_out, XP_PATH_MAX, "D:%s", nl ? norm : "\\");
+    if (nl == 0) {
+        snprintf(ftp_out, XP_PATH_MAX, "/");
+        dos_out[0] = 0;
+        return FTP_ROOT;
+    }
+    // "/E" or "/E/...": the first part is the drive letter.
+    char drive = norm[1];
+    if (!((drive >= 'A' && drive <= 'Z') || (drive >= 'a' && drive <= 'z')) || (norm[2] != 0 && norm[2] != '/')) {
+        return FTP_BAD;
+    }
+    if (drive >= 'a') {
+        drive = (char)(drive - 32);
+    }
+    norm[1] = drive;
+    snprintf(ftp_out, XP_PATH_MAX, "%s", norm);
+    snprintf(dos_out, XP_PATH_MAX, "%c:%s", drive, norm[2] ? norm + 2 : "\\");
     for (char *c = dos_out; *c; c++) {
         if (*c == '/') {
             *c = '\\';
         }
     }
-    return 1;
+    return FTP_PATH;
 }

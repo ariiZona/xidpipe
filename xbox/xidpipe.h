@@ -15,14 +15,16 @@
 // Thread-safe screen output (debugPrint isn't safe to call from several threads at once).
 void say(const char *fmt, ...);
 
-// The running XBE: its DOS path on the D: drive (D: is the folder it was started from).
+// The running XBE: its path on Q: (the folder it was started from), and the same file on its
+// real drive letter ("" if it isn't on one of the mounted drives).
 const char *self_xbe_path(void);
 const char *self_xbe_name(void);
+const char *self_xbe_real_path(void);
 
 // True if an empty marker file with this name exists next to the XBE (used for opt-outs).
 int marker_exists(const char *name);
 
-// Replace the running XBE with `new_path` (a complete, already verified file on D:).
+// Replace the running XBE with `new_path` (a complete, already verified file on Q:).
 // The old file is kept until the new one is in place and put back if anything fails.
 // Returns 1 on success.
 int install_xbe(const char *new_path);
