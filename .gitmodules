@@ -2,3 +2,7 @@
 	path = xbox/nxdk
 	url = https://github.com/XboxDev/nxdk.git
 	ignore = untracked
+[submodule "xbox/bearssl"]
+	path = xbox/bearssl
+	url = https://www.bearssl.org/git/BearSSL
+	ignore = untracked

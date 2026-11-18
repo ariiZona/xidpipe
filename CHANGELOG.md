@@ -2,6 +2,18 @@
 
 Each release's notes on GitHub are taken from its section here.
 
+## Unreleased
+
+- The Xbox app checks GitHub for a newer release when it starts, downloads it, and installs it when you
+  hold A for 2 seconds (B skips). HTTPS with BearSSL and built-in root certificates; the download must be
+  complete and a valid XBE, and the old XBE is kept until the new one is in place.
+- The Xbox app has a small FTP server for its own folder (port 21, passive mode). Uploading a new
+  `default.xbe` installs it and restarts xidpipe.
+- Either can be turned off with an empty `no-update-check` or `no-ftp` file in xidpipe's folder.
+- The Xbox screen shows the version. It's the same as the PC app's, taken from `pc/Cargo.toml`.
+- Releases now include `xidpipe-vX.Y.Z-default.xbe`, the file the update check downloads.
+- Coming from v0.1.x: install v0.2.0 by hand once; later updates come by themselves.
+
 ## v0.1.1
 
 Tested on real hardware: the Pelican pad from v0.1.0, found automatically on a Windows PC with nine network

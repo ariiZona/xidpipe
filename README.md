@@ -17,7 +17,8 @@ OG controller --USB--> Xbox (xbox/, nxdk homebrew) --UDP, LAN--> PC (pc/, Rust) 
 ```
 
 **Tested on real hardware so far:** one 3rd-party Pelican pad (reports itself as `ffff:ffff`, rejected by
-XBlast OS and Gentoox) on Windows, playing through xemu. Everything else is only built and unit-tested by CI.
+XBlast OS and Gentoox) on Windows, playing through xemu and xbased. The Xbox app's FTP server and update
+check (new in v0.2.0) haven't been tested on hardware yet. Everything else is only built and unit-tested by CI.
 
 ## What you need
 
@@ -41,6 +42,8 @@ XBlast OS and Gentoox) on Windows, playing through xemu. Everything else is only
    If the Xbox isn't found (for example it's on another subnet), type the IP from the Xbox screen into
    **Xbox address** in the window. The window remembers it, and your other settings, for next time.
 
+From then on the Xbox app keeps itself up to date (see [Updating the Xbox app](#updating-the-xbox-app)).
+
 ## Features
 
 - **3rd-party controllers:** any Xbox-protocol (XID, USB class 0x58) device works, including pads that don't
@@ -63,6 +66,10 @@ XBlast OS and Gentoox) on Windows, playing through xemu. Everything else is only
   shows the controller's real gate and any snapping) and Debug (rates, gaps, lost packets, network round
   trip, raw reports, rumble tests, log).
 - **Command line:** run without a window, with a preset.
+- **Self-updating Xbox app:** on start it checks GitHub for a newer release and downloads it. You install
+  it with the controller, and xidpipe restarts into it.
+- **Built-in FTP server** on the Xbox, for xidpipe's own folder, so you can swap files without going back
+  to the dashboard. Uploading a new `default.xbe` installs it and restarts.
 - **Several controllers:** each one gets its own virtual controller. Pads on the four front ports are
   numbered 1–4 by port; other Xbox-protocol devices (for example behind an extra hub) get 5 and up.
   The Xbox app handles up to 8.
@@ -96,6 +103,40 @@ original pad has no such button.
   1 ms at 1000 Hz. If a pad misbehaves at a high rate, go back to auto.
 - The Debug tab times the longest gap between updates both on the Xbox (before the network) and on the PC.
   If only the PC number is high, the network caused it.
+
+## Updating the Xbox app
+
+**Update check.** When it starts, the Xbox app asks GitHub for the latest release (HTTPS, checked against
+the root certificates built into it, see [`xbox/roots.h`](xbox/roots.h)). If that release is newer, it
+downloads its `default.xbe` next to the running one and asks on screen:
+
+- **hold A for 2 seconds** (on any controller) to install it and restart, or
+- **press B** to skip it this time.
+
+The Xbox needs internet access for this; without it, the screen says the check failed and everything else
+works as usual. An update is only installed after the download has completed and looks like a valid XBE,
+and the old XBE is kept until the new one is in place.
+
+**FTP server.** While it runs, the Xbox app serves its own folder over FTP on port 21: any user name and
+password, passive mode (FileZilla's default). It can't reach anything outside that folder. Uploading a new
+copy of the running XBE (normally `default.xbe`) checks it, installs it the same safe way, and restarts
+xidpipe. Other files are saved as they are. You can't delete or rename the running XBE, only replace it.
+
+**Turning them off.** Create an empty file in xidpipe's folder on the Xbox:
+
+| file name | effect |
+|---|---|
+| `no-update-check` | no update check (the Xbox never contacts GitHub) |
+| `no-ftp` | no FTP server |
+
+Anyone on your network can use the FTP server while xidpipe runs, so use `no-ftp` on networks you don't trust.
+
+**Coming from v0.1.x:** those versions have neither feature, so install v0.2.0 the usual way, with your
+dashboard's FTP. After that, updates come by themselves.
+
+The update check reads [GitHub's latest release](https://github.com/ariiZona/xidpipe/releases/latest)
+and downloads its `xidpipe-vX.Y.Z-default.xbe` asset. Forks can point it at their own repository:
+`make XIDPIPE_REPO=owner/name`.
 
 ## Using it
 
@@ -217,6 +258,10 @@ except the ones marked *untested*:
 cd xbox
 nxdk/bin/activate make -j4
 ```
+
+The Xbox app also uses [BearSSL](https://www.bearssl.org/) (TLS for the update check), which comes in as
+another submodule, so there's nothing extra to install. Its version number comes from `pc/Cargo.toml`.
+To run its unit tests on the PC (any C compiler): `cc -std=c11 -o util_test tests/util_test.c util.c && ./util_test`.
 
 `nxdk/bin/activate` sets up nxdk's environment, then runs `make` in it. The first build also compiles nxdk's
 libraries and tools, so it takes a few minutes; later builds are quick. You get `xbox/bin/default.xbe` (copy
@@ -349,7 +394,8 @@ without rebuilding the Xbox app.
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) builds and tests the PC app on Linux, Windows and macOS
 and builds the Xbox `.xbe`/`.iso` on every push, then uploads the builds as artifacts. Pushing a tag like
 `v0.1.0` (it must match the version in `pc/Cargo.toml`) also publishes a GitHub release with those builds
-attached, and its notes come from that version's section in [CHANGELOG.md](CHANGELOG.md).
+attached, and its notes come from that version's section in [CHANGELOG.md](CHANGELOG.md). The release
+includes `xidpipe-vX.Y.Z-default.xbe` on its own: that's the file installed Xbox apps download to update.
 The workflow also runs on Forgejo/Gitea Actions (minus the release step). There, the Windows and macOS jobs
 need runners with those labels.
 

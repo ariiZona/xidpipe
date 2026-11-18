@@ -9,8 +9,11 @@
 // Rumble comes back from the PC the same way (full state, resent), and stops by itself if
 // the PC goes quiet, so a lost packet or a crashed PC can't leave the motors running.
 
+#include "xidpipe.h"
 #include <hal/debug.h>
 #include <hal/video.h>
+#include <hal/xbox.h>
+#include <nxdk/path.h>
 #include <windows.h>
 #include <xboxkrnl/xboxkrnl.h>
 #include <nxdk/net.h>
@@ -21,6 +24,8 @@
 #include <usbh_lib.h>
 #include <usb.h>
 #include <hub.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <string.h>
 
 #define XP_PORT 47100 // keep in sync with pc/src/engine.rs
@@ -69,6 +74,8 @@ extern struct netif *g_pnetif;
 static pad_t pads[MAX_PADS];
 static uint32_t seqs[16]; // per pad id; never reset, so the PC can drop stale packets
 static KEVENT wake;
+static CRITICAL_SECTION screen_lock;
+static char self_path[MAX_PATH]; // "D:\default.xbe" (D: is the XBE's own folder)
 static ULONGLONG perf_hz;
 static uint8_t poll_ms;   // applied polling setting from the PC: 0 = auto, else 1/2/4/8 ms
 
@@ -81,6 +88,76 @@ static DWORD peer_seen;
 static uint8_t want_poll_ms;
 static uint16_t want_rumble[16][2]; // by pad id
 static DWORD rumble_seen[16];
+
+void say(const char *fmt, ...)
+{
+    char b[512];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(b, sizeof(b) - 1, fmt, ap);
+    va_end(ap);
+    if (n < 0) {
+        return;
+    }
+    if (n > (int)sizeof(b) - 2) {
+        n = (int)sizeof(b) - 2;
+    }
+    if (n == 0 || b[n - 1] != '\n') {
+        b[n++] = '\n';
+        b[n] = 0;
+    }
+    EnterCriticalSection(&screen_lock);
+    debugPrint("%s", b);
+    LeaveCriticalSection(&screen_lock);
+}
+
+const char *self_xbe_path(void)
+{
+    return self_path;
+}
+
+const char *self_xbe_name(void)
+{
+    return self_path + 3; // after "D:\"
+}
+
+int marker_exists(const char *name)
+{
+    char path[MAX_PATH];
+    snprintf(path, sizeof(path), "D:\\%s", name);
+    return GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
+}
+
+int looks_like_xbe(const uint8_t *data, uint32_t len)
+{
+    return data != NULL && len >= 0x1000 && memcmp(data, "XBEH", 4) == 0;
+}
+
+int install_xbe(const char *new_path)
+{
+    char old[MAX_PATH + 8];
+    snprintf(old, sizeof(old), "%s.old", self_path);
+    DeleteFileA(old);
+    if (!MoveFileA(self_path, old)) {
+        return 0;
+    }
+    if (!MoveFileA(new_path, self_path)) {
+        MoveFileA(old, self_path); // put the working one back
+        return 0;
+    }
+    DeleteFileA(old);
+    return 1;
+}
+
+void relaunch_self(void)
+{
+    char nt[MAX_PATH];
+    nxGetCurrentXbeNtPath(nt);
+    XLaunchXBE(nt);
+    for (;;) {
+        Sleep(1000);
+    }
+}
 
 // Caller holds the lwIP core lock.
 static void send_raw(const ip_addr_t *to, u16_t port, const void *data, u16_t len)
@@ -399,7 +476,7 @@ static int xp_probe(IFACE_T *iface)
         }
     }
     p->out_utr = out;
-    debugPrint("Pad %u connected (%04x:%04x, XID %02x/%02x, polled every %u ms)\n", p->id, p->vid, p->pid, type, sub,
+    say("Pad %u connected (%04x:%04x, XID %02x/%02x, polled every %u ms)\n", p->id, p->vid, p->pid, type, sub,
                p->interval);
     return USBH_OK;
 }
@@ -430,7 +507,7 @@ static void xp_disconnect(IFACE_T *iface)
     iface->context = NULL;
 
     send_pad(p, MSG_UNPLUGGED);
-    debugPrint("Pad %u disconnected\n", p->id);
+    say("Pad %u disconnected\n", p->id);
 }
 
 // Re-arm a read that stopped (USB error, 3rd-party glitch, or an interval change).
@@ -460,10 +537,17 @@ int main(void)
     static UDEV_DRV_T xp_driver = {xp_probe, xp_disconnect, NULL, NULL};
 
     XVideoSetMode(640, 480, 32, REFRESH_DEFAULT);
-    debugPrint("xidpipe\n\nStarting network...\n");
+    InitializeCriticalSection(&screen_lock);
+    {
+        char nt[MAX_PATH];
+        nxGetCurrentXbeNtPath(nt);
+        const char *name = strrchr(nt, '\\');
+        snprintf(self_path, sizeof(self_path), "D:\\%s", name ? name + 1 : "default.xbe");
+    }
+    say("xidpipe v" XIDPIPE_VERSION "\n\nStarting network...\n");
 
     if (nxNetInit(NULL) != 0) {
-        debugPrint("Network failed to start. Check the cable and DHCP, then restart xidpipe.\n");
+        say("Network failed to start. Check the cable and DHCP, then restart xidpipe.\n");
         for (;;) {
             Sleep(1000);
         }
@@ -480,17 +564,20 @@ int main(void)
     }
     UNLOCK_TCPIP_CORE();
     if (bound != ERR_OK) {
-        debugPrint("Could not open UDP port %d.\n", XP_PORT);
+        say("Could not open UDP port %d.\n", XP_PORT);
         for (;;) {
             Sleep(1000);
         }
     }
-    debugPrint("Xbox IP: %s  (UDP %d)\n", ip4addr_ntoa(netif_ip4_addr(g_pnetif)), XP_PORT);
-    debugPrint("Run xidpipe on the PC. If it can't find the Xbox, enter this IP in xidpipe.\n\n");
+    say("Xbox IP: %s  (UDP %d)\n", ip4addr_ntoa(netif_ip4_addr(g_pnetif)), XP_PORT);
+    say("Run xidpipe on the PC. If it can't find the Xbox, enter this IP in xidpipe.\n");
+    ftp_start();
+    update_start();
 
     usbh_core_init();
     usbh_register_driver(&xp_driver);
 
+    DWORD a_held_since = 0;
     for (;;) {
         // Woken at once by a USB report or a PC packet; the timeout paces hotplug and resends.
         LARGE_INTEGER timeout;
@@ -521,14 +608,14 @@ int main(void)
         UNLOCK_TCPIP_CORE();
 
         if (connected) {
-            debugPrint("PC connected: %s\n", peer_text);
+            say("PC connected: %s\n", peer_text);
         }
         if (gone) {
-            debugPrint("PC gone, waiting for it again\n");
+            say("PC gone, waiting for it again\n");
         }
         if (want_poll != poll_ms && (want_poll == 0 || want_poll == 1 || want_poll == 2 || want_poll == 4 || want_poll == 8)) {
             poll_ms = want_poll;
-            debugPrint("Polling: %s%u ms\n", poll_ms ? "every " : "auto, at most ", poll_ms ? poll_ms : AUTO_MAX_INTERVAL_MS);
+            say("Polling: %s%u ms\n", poll_ms ? "every " : "auto, at most ", poll_ms ? poll_ms : AUTO_MAX_INTERVAL_MS);
             for (int i = 0; i < MAX_PADS; i++) {
                 if (pads[i].iface != NULL && interval_for(&pads[i]) != pads[i].interval) {
                     set_interval(&pads[i], interval_for(&pads[i]), now);
@@ -551,6 +638,36 @@ int main(void)
                 send_info(p, now);
             }
             update_rumble(p, rumble[p->id & 15]);
+        }
+
+        // A downloaded update waits for the user: hold A for 2 s on any pad to install it, B to skip.
+        if (update_state == UPDATE_READY) {
+            int a = 0, b = 0;
+            for (int i = 0; i < MAX_PADS; i++) {
+                if (pads[i].iface != NULL && pads[i].len >= 6) {
+                    a |= pads[i].report[4] > 0x40;
+                    b |= pads[i].report[5] > 0x40;
+                }
+            }
+            if (b) {
+                update_state = UPDATE_NONE;
+                DeleteFileA(update_file);
+                say("Update skipped; it will be offered again next time.");
+            } else if (!a) {
+                a_held_since = 0;
+            } else if (a_held_since == 0) {
+                a_held_since = now ? now : 1;
+            } else if (now - a_held_since >= 2000) {
+                update_state = UPDATE_INSTALLING;
+                say("Installing xidpipe %s...", update_version);
+                if (install_xbe(update_file)) {
+                    say("Restarting...");
+                    relaunch_self();
+                }
+                say("Install failed; keeping v" XIDPIPE_VERSION ".");
+                DeleteFileA(update_file);
+                update_state = UPDATE_NONE;
+            }
         }
     }
 }

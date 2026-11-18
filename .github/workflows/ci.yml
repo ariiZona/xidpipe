@@ -47,6 +47,8 @@ jobs:
           submodules: recursive
       - name: Install nxdk prerequisites
         run: sudo apt-get update && sudo apt-get install -y clang lld llvm bison flex cmake make
+      - name: Unit tests (FTP paths, HTTP and update-check parsing)
+        run: cc -std=c11 -Wall -Wextra -Werror -o util_test xbox/tests/util_test.c xbox/util.c && ./util_test
       - name: Build
         working-directory: xbox
         run: nxdk/bin/activate make -j"$(nproc)"
@@ -88,6 +90,8 @@ jobs:
             tar -C "$src" -czf "out/xidpipe-$v-${os##*:}.tar.gz" xidpipe README.md LICENSE
           done
           (cd dist/xidpipe-xbox && zip -9 -j "../../out/xidpipe-$v-xbox.zip" bin/default.xbe xidpipe.iso)
+          # The Xbox app's update check downloads this file by this exact name.
+          cp dist/xidpipe-xbox/bin/default.xbe "out/xidpipe-$v-default.xbe"
           ls -l out
       - name: Release notes from CHANGELOG.md
         run: |

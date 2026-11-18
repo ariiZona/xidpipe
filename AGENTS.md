@@ -18,9 +18,15 @@ Two programs that talk over UDP:
 
 | path | role |
 |---|---|
-| `xbox/main.c` | the whole Xbox app: USB probe/driver, DPC callbacks, lwIP UDP, polling, rumble |
-| `xbox/Makefile` | nxdk build (`NXDK_DIR` defaults to the `xbox/nxdk` submodule) |
-| `xbox/nxdk` | pinned nxdk submodule. Don't bump it casually; rebuild and retest if you do |
+| `xbox/main.c` | Xbox app core: USB probe/driver, DPC callbacks, lwIP UDP, polling, rumble, update prompt, `say()` |
+| `xbox/ftp.c` | FTP server for the XBE's own folder (own thread) |
+| `xbox/update.c` | update check and download over HTTPS with BearSSL (own thread) |
+| `xbox/util.c` | platform-free helpers (HTTP/JSON parsing, version compare, FTP path sandbox), unit-tested |
+| `xbox/tests/util_test.c` | host-side tests for `util.c` |
+| `xbox/roots.h` | root certificates the update check trusts |
+| `xbox/xidpipe.h` | declarations shared by the Xbox app's files |
+| `xbox/Makefile` | nxdk build (`NXDK_DIR` defaults to the `xbox/nxdk` submodule); BearSSL as a static library |
+| `xbox/nxdk`, `xbox/bearssl` | pinned submodules. Don't bump them casually; rebuild and retest if you do |
 | `pc/src/engine.rs` | network loop, protocol encode/decode, rumble sink, live status for the GUI |
 | `pc/src/pad.rs` | XID report parsing, `Preset` (TOML) / `Profile`, deadzones, snap correction, mapping, stick trace |
 | `pc/src/output.rs` | backends: ViGEm X360/DS4 (Windows), uinput + force feedback (Linux), null |
@@ -49,9 +55,11 @@ Xbox app (from `xbox/`, after `git submodule update --init --recursive`):
 
 ```sh
 nxdk/bin/activate make -j4      # on Windows: inside an MSYS2 MINGW64 shell
+cc -std=c11 -Wall -Wextra -Werror -o util_test tests/util_test.c util.c && ./util_test
 ```
 
-Builds must stay warning-free in our own code (warnings inside nxdk's tools are not ours).
+Builds must stay warning-free in our own code (warnings inside nxdk's tools and BearSSL are not ours).
+The Xbox app's version comes from `pc/Cargo.toml`: the Makefile passes it in as `XIDPIPE_VERSION`.
 
 ## Rules that keep it working
 
@@ -65,6 +73,8 @@ Add a decode/encode test in `engine.rs` for any new or changed message.
   `KeSetEvent` there; no sends, no prints, no waits. `on_udp` runs in lwIP's thread with the core lock
   held: don't take the lock again or block. Main-loop data shared with the DPC is copied at raised IRQL
   (single CPU); data shared with `on_udp` is touched only under `LOCK_TCPIP_CORE`.
+- Xbox: the FTP and update threads run at below-normal priority so they can't delay the main loop. They
+  only share `update_state`/`update_file` with it, and print with `say()` (debugPrint isn't thread-safe).
 - PC: the engine loop must not wait on the GUI or on rumble. Backends report rumble through `Rumble::set`
   from their own thread. The GUI only reads a snapshot of `Status`.
 
@@ -72,6 +82,10 @@ Add a decode/encode test in `engine.rs` for any new or changed message.
 - The PC releases all inputs after 500 ms without packets.
 - The Xbox zeroes rumble after 1 s without rumble packets or when the PC disappears; the PC resends rumble every 250 ms.
 - Only the PC the Xbox streams to may drive rumble.
+- The Xbox app never replaces its own XBE with anything that isn't a complete, valid-looking XBE, and keeps
+  the old one until the new one is in place (`install_xbe`). Updates install only after the user holds A.
+  The FTP server stays inside the XBE's folder (`ftp_resolve`, which has tests); keep it that way.
+- Certificates are verified against `roots.h`. Never turn verification off to make a download work.
 
 **3rd-party controllers are a first-class target.** Never require an XID descriptor, specific VID/PID or
 exact report length. Zero-pad short reports. Real hardware has shown pads reporting `ffff:ffff`, a fixed
@@ -95,6 +109,8 @@ validation, a row in the README's settings table, and a control in the GUI if it
 - Release: bump `version` in `pc/Cargo.toml`, add a `## vX.Y.Z` section to `CHANGELOG.md`, commit, then
   push an annotated tag `vX.Y.Z`. CI builds everything and publishes the GitHub release; it fails if the tag
   and `Cargo.toml` disagree or the changelog section is missing.
+- Released Xbox apps download `xidpipe-vX.Y.Z-default.xbe` from the latest release. Never rename that
+  asset or drop it from the release job, or every installed copy stops updating.
 
 ## Testing limits
 
