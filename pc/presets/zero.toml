@@ -1,0 +1,12 @@
+# xidpipe preset: zero deadzone. Raw stick and trigger values pass straight through.
+backend = "xinput"
+pressure = false
+# Not a deadzone: the pressure where an analog button becomes a digital press.
+press_threshold = 30
+analog_deadzone = 0
+left_stick_deadzone = 0
+right_stick_deadzone = 0
+
+[map]
+lb = "white"
+rb = "black"

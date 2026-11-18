@@ -1,0 +1,34 @@
+# xidpipe preset: Xbox controller defaults.
+# Copy it to make your own:  xidpipe save mypreset xbox
+
+# Which controller the PC sees:
+#   "xinput" - Xbox 360 controller (Windows: ViGEmBus, Linux: uinput)
+#   "dinput" - Windows: DualShock 4 via ViGEmBus; Linux: generic (non-XInput) uinput pad
+#   "none"   - no virtual controller (use with --monitor)
+backend = "xinput"
+
+# true: A B X Y Black White send their pressure (0-255) when mapped to lt/rt.
+# false: they are plain on/off buttons everywhere.
+pressure = false
+
+# Raw pressure (0-255) at which an analog button counts as pressed for a digital output.
+# 30 is the original Xbox SDK's analog-button crosstalk threshold.
+press_threshold = 30
+
+# Deadzone for the 8 analog buttons when they drive an analog output (0-255).
+# 30 is XInput's trigger threshold.
+analog_deadzone = 30
+
+# Radial stick deadzones (0-32000). XInput's recommended values.
+# Note: most games add their own deadzone on top of this one.
+left_stick_deadzone = 7849
+right_stick_deadzone = 8689
+
+# output = "input". Unlisted outputs keep these defaults.
+# Outputs: a b x y lb rb back start ls rs up down left right guide lt rt lx ly rx ry
+# Inputs:  a b x y black white lt rt up down left right start back ls rs lx ly rx ry none
+# Sticks only map to sticks; buttons and triggers map to each other freely.
+[map]
+lb = "white"
+rb = "black"
+guide = "none"

@@ -1,0 +1,7 @@
+/pc/target/
+/xbox/bin/
+/xbox/*.iso
+*.obj
+*.d
+*.exe
+*.lib
