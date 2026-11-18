@@ -46,6 +46,7 @@
 #define PEER_TIMEOUT_MS 3000
 #define RETRY_MS 500
 #define RUMBLE_TIMEOUT_MS 1000 // the PC resends every 250 ms
+#define RUMBLE_RETRY_MS 250    // a failed rumble write is sent again after this
 #define AUTO_MAX_INTERVAL_MS 8 // "auto" polling never goes below 125 Hz
 #define XID_CLASS 0x58
 
@@ -68,6 +69,8 @@ typedef struct {
     DWORD sent_at, failed_at, info_at;
     UTR_T *out_utr;           // rumble writes; NULL if the pad has no OUT endpoint
     volatile uint8_t out_busy;
+    volatile uint8_t out_failed; // the last rumble write failed (set by the DPC or the main loop)
+    DWORD out_failed_at;
     uint16_t rumble_sent[2];
 } pad_t;
 
@@ -410,16 +413,28 @@ static void on_report(UTR_T *utr)
     KeSetEvent(&wake, 1, FALSE);
 }
 
-// Runs in the USB DPC when a rumble write finished (or failed; the next change retries).
+// Runs in the USB DPC when a rumble write finished or failed (update_rumble retries failures).
 static void on_rumble_done(UTR_T *utr)
 {
-    ((pad_t *)utr->context)->out_busy = 0;
+    pad_t *p = (pad_t *)utr->context;
+    if (utr->status < 0) {
+        p->out_failed = 1;
+    }
+    p->out_busy = 0;
     KeSetEvent(&wake, 1, FALSE);
 }
 
-static void update_rumble(pad_t *p, const uint16_t want[2])
+static void update_rumble(pad_t *p, const uint16_t want[2], DWORD now)
 {
-    if (p->out_utr == NULL || p->out_busy || (want[0] == p->rumble_sent[0] && want[1] == p->rumble_sent[1])) {
+    if (p->out_utr == NULL || p->out_busy) {
+        return;
+    }
+    if (p->out_failed && p->out_failed_at == 0) {
+        p->out_failed_at = now ? now : 1; // failed in the DPC
+    }
+    // A failed write is resent, so a lost "motors off" can't leave them running.
+    int retry = p->out_failed && now - p->out_failed_at >= RUMBLE_RETRY_MS;
+    if (!retry && want[0] == p->rumble_sent[0] && want[1] == p->rumble_sent[1]) {
         return;
     }
     // XID rumble report: id 0, length 6, left u16, right u16
@@ -433,12 +448,16 @@ static void update_rumble(pad_t *p, const uint16_t want[2])
     p->out_utr->data_len = 6;
     p->out_utr->xfer_len = 0;
     p->out_utr->bIsTransferDone = 0;
-    // Marked sent even if queueing fails, so a pad that rejects rumble isn't retried every loop.
+    // No transfer is in flight (out_busy is 0), so the DPC can't touch out_failed here.
     p->rumble_sent[0] = want[0];
     p->rumble_sent[1] = want[1];
+    p->out_failed = 0;
+    p->out_failed_at = 0;
     p->out_busy = 1;
     if (usbh_int_xfer(p->out_utr) != USBH_OK) {
         p->out_busy = 0;
+        p->out_failed = 1; // retried every RUMBLE_RETRY_MS, not every loop
+        p->out_failed_at = now ? now : 1;
     }
 }
 
@@ -751,7 +770,7 @@ int main(void)
             if (now - p->info_at >= INFO_MS) {
                 send_info(p, now);
             }
-            update_rumble(p, rumble[p->id & 15]);
+            update_rumble(p, rumble[p->id & 15], now);
         }
 
         // All pads' buttons together, for the menu and the update prompt.

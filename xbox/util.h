@@ -8,6 +8,9 @@
 #include <stdint.h>
 
 #define XP_PATH_MAX 260
+// Drives the FTP server serves, in listing order. Q: (xidpipe's own folder) is left out on purpose:
+// it is a second name for the running XBE's folder and would get around its protection.
+#define XP_DRIVES "CDEFGXYZ"
 
 // Copy the value of HTTP header `name` (case-insensitive) into `out`. `hdrs` is the status line
 // and headers, each ending in CRLF. Returns 1 if found and it fits.
@@ -30,7 +33,7 @@ int64_t date_to_unix(const char *date);
 
 // Map FTP path `arg` (absolute, or relative to folder `cwd`) onto the Xbox's drives the way Xbox
 // dashboards do: "/" is the list of drives, "/E/Apps" is "E:\Apps". "." and ".." are resolved
-// and stop at "/"; the first part must be a single drive letter; ':' is rejected (no "C:" tricks
+// and stop at "/"; the first part must be one of XP_DRIVES; ':' is rejected (no "C:" tricks
 // or alternate streams). Both outputs are XP_PATH_MAX bytes.
 enum { FTP_BAD = 0, FTP_PATH = 1, FTP_ROOT = 2 };
 int ftp_resolve(const char *cwd, const char *arg, char *ftp_out, char *dos_out);
