@@ -63,6 +63,9 @@ pub struct XboxInfo {
     pub has_rumble: bool,
     pub reports_per_s: u16,
     pub usb_errors: u16,
+    /// Longest gap between two controller reports in the last second, timed on the Xbox
+    /// before the network (None from older Xbox builds)
+    pub worst_gap: Option<Duration>,
 }
 
 /// What the GUI shows about one pad.
@@ -517,6 +520,7 @@ fn decode(b: &[u8]) -> Option<Msg<'_>> {
                 has_rumble: b[9] != 0,
                 reports_per_s: u16_at(10),
                 usb_errors: u16_at(12),
+                worst_gap: (b.len() >= 16).then(|| Duration::from_micros(u16_at(14) as u64 * 100)),
             },
         }),
         MSG_STATE | MSG_UNPLUGGED => {
@@ -575,21 +579,31 @@ mod tests {
             decode(&[b'X', b'P', 1, MSG_PONG, 0, 0, 1, 2, 3, 4]),
             Some(Msg::Pong { ping: 0x04030201 })
         );
-        let info = [b'X', b'P', 1, MSG_INFO, 3, 8, 4, 1, 2, 1, 250, 0, 7, 0];
+        let info = [
+            b'X', b'P', 1, MSG_INFO, 3, 8, 4, 1, 2, 1, 250, 0, 7, 0, 170, 0,
+        ];
+        let expected = XboxInfo {
+            dev_interval: 8,
+            interval: 4,
+            xid: (1, 2),
+            has_rumble: true,
+            reports_per_s: 250,
+            usb_errors: 7,
+            worst_gap: Some(Duration::from_micros(17_000)),
+        };
         assert_eq!(
             decode(&info),
             Some(Msg::Info {
                 pad: 3,
-                info: XboxInfo {
-                    dev_interval: 8,
-                    interval: 4,
-                    xid: (1, 2),
-                    has_rumble: true,
-                    reports_per_s: 250,
-                    usb_errors: 7
-                }
+                info: expected
             })
         );
+        // Older Xbox builds send 14 bytes, without the gap
+        let old = XboxInfo {
+            worst_gap: None,
+            ..expected
+        };
+        assert_eq!(decode(&info[..14]), Some(Msg::Info { pad: 3, info: old }));
         assert_eq!(decode(&info[..13]), None);
     }
 

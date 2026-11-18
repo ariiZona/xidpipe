@@ -54,6 +54,8 @@ typedef struct {
     volatile uint8_t failed;  // reading stopped (USB error or interval change); main loop re-arms
     volatile uint8_t len;
     volatile uint16_t errors;
+    volatile ULONGLONG last_report_tc; // performance counter at the last report (DPC)
+    volatile ULONGLONG worst_gap_tc;   // longest gap between reports since the last info
     uint8_t report[REPORT_MAX];
     uint32_t sent_gen, info_gen;
     DWORD sent_at, failed_at, info_at;
@@ -67,6 +69,7 @@ extern struct netif *g_pnetif;
 static pad_t pads[MAX_PADS];
 static uint32_t seqs[16]; // per pad id; never reset, so the PC can drop stale packets
 static KEVENT wake;
+static ULONGLONG perf_hz;
 static uint8_t poll_ms;   // applied polling setting from the PC: 0 = auto, else 1/2/4/8 ms
 
 // Shared with the lwIP callback; only touched while holding the lwIP core lock.
@@ -180,8 +183,15 @@ static void send_info(pad_t *p, DWORD now)
     uint32_t elapsed = now - p->info_at;
     uint32_t rate = elapsed ? (p->gen - p->info_gen) * 1000 / elapsed : 0;
     uint16_t errors = p->errors;
-    uint8_t b[14] = {'X', 'P', XP_VERSION, MSG_INFO, p->id, p->dev_interval, p->interval, p->xid_type,
-                     p->xid_sub, p->out_utr != NULL, rate, rate >> 8, errors, errors >> 8};
+    KIRQL irql = KeRaiseIrqlToDpcLevel();
+    ULONGLONG worst = p->worst_gap_tc;
+    p->worst_gap_tc = 0;
+    KfLowerIrql(irql);
+    // Longest gap between two controller reports, in 0.1 ms, measured before the network.
+    ULONGLONG gap = perf_hz ? worst * 10000 / perf_hz : 0;
+    uint16_t gap16 = gap > 0xFFFF ? 0xFFFF : (uint16_t)gap;
+    uint8_t b[16] = {'X', 'P', XP_VERSION, MSG_INFO, p->id, p->dev_interval, p->interval, p->xid_type,
+                     p->xid_sub, p->out_utr != NULL, rate, rate >> 8, errors, errors >> 8, gap16, gap16 >> 8};
     p->info_gen = p->gen;
     p->info_at = now;
     send_peer(b, sizeof(b));
@@ -210,6 +220,11 @@ static void on_report(UTR_T *utr)
         memcpy(p->report, utr->buff, n);
         p->len = n;
         p->gen++;
+        ULONGLONG tc = KeQueryPerformanceCounter();
+        if (p->last_report_tc && tc - p->last_report_tc > p->worst_gap_tc) {
+            p->worst_gap_tc = tc - p->last_report_tc;
+        }
+        p->last_report_tc = tc;
     }
 
     utr->xfer_len = 0;
@@ -455,6 +470,7 @@ int main(void)
     }
 
     KeInitializeEvent(&wake, SynchronizationEvent, FALSE);
+    perf_hz = KeQueryPerformanceFrequency();
 
     LOCK_TCPIP_CORE();
     pcb = udp_new();

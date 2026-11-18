@@ -25,6 +25,12 @@ analog_deadzone = 30
 left_stick_deadzone = 7849
 right_stick_deadzone = 8689
 
+# Cheap pads sometimes add their own per-axis dead zone: the stick snaps to the axes and then
+# jumps. Set this to that zone's size (the Button tester measures it) to remove the jump.
+# 0 = off. The snapping inside the zone can't be undone: the controller doesn't send it.
+left_snap_zone = 0
+right_snap_zone = 0
+
 # vJoy only: device used by pad 1 (pad 2 uses the next one, and so on).
 vjoy_device = 1
 

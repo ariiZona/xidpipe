@@ -41,6 +41,9 @@ const IN_DIGITAL: [(u8, &str); 8] = [
 ];
 const IN_ANALOG: [&str; 8] = ["A", "B", "X", "Y", "Black", "White", "LT", "RT"];
 const ERROR: Color32 = Color32::from_rgb(0xd0, 0x40, 0x40);
+const SNAP_HELP: &str = "Snap correction: some cheap pads zero small stick values themselves, so the stick \
+    snaps to straight up/down/left/right and then jumps. Set this to the size of that zone and \
+    xidpipe removes the jump. The snapping inside the zone stays: the controller never sends it.";
 
 pub fn run() -> Result<(), String> {
     let name = "xbox".to_string();
@@ -74,6 +77,7 @@ pub fn run() -> Result<(), String> {
         tab: Tab::Setup,
         test_power: 50,
         test_ms: 700,
+        traces: Default::default(),
         name,
         preset,
         xbox_ip: String::new(),
@@ -103,6 +107,7 @@ struct App {
     /// Debug tab rumble test: power (%) and length (ms)
     test_power: u8,
     test_ms: u16,
+    traces: std::collections::HashMap<u8, pad::Trace>,
     xbox_ip: String,
     save_as: String,
     /// Result of the last load/save: (text, is error)
@@ -333,6 +338,15 @@ impl App {
         ui.add(
             egui::Slider::new(&mut self.preset.right_stick_deadzone, 0..=32000).text("right stick"),
         );
+        ui.add(
+            egui::Slider::new(&mut self.preset.left_snap_zone, 0..=16000)
+                .text("left snap correction"),
+        )
+        .on_hover_text(SNAP_HELP);
+        ui.add(
+            egui::Slider::new(&mut self.preset.right_snap_zone, 0..=16000)
+                .text("right snap correction"),
+        );
         ui.add(egui::Slider::new(&mut self.preset.analog_deadzone, 0..=255).text("analog buttons"));
         ui.add(egui::Slider::new(&mut self.preset.press_threshold, 0..=255).text("press point"))
             .on_hover_text(
@@ -501,7 +515,7 @@ impl App {
     }
 
     /// Button tester: the raw controller as the Xbox reads it, before deadzones and mapping.
-    fn tester_ui(&self, ui: &mut Ui) {
+    fn tester_ui(&mut self, ui: &mut Ui) {
         let pads = self.status.lock().unwrap().pads.clone();
         ui.heading("Button tester");
         ui.label(
@@ -535,6 +549,54 @@ impl App {
                             .map(|b| b.1)
                             .collect();
                         ui.label(format!("Pressed: {}", pressed.join(" ")));
+                    });
+                });
+
+                let trace = self.traces.entry(*id).or_default();
+                trace.add(&v.raw);
+                ui.label(
+                    "Stick trace: rotate a stick all the way round, then sweep it slowly across \
+                     straight up/down/left/right. Gaps along the lines mean the controller snaps there.",
+                );
+                ui.horizontal(|ui| {
+                    let zones = [self.preset.left_snap_zone, self.preset.right_snap_zone];
+                    for (stick, label) in [(0, "Left stick"), (1, "Right stick")] {
+                        trace_plot(ui, label, &trace.points[stick], zones[stick]);
+                    }
+                    ui.vertical(|ui| {
+                        let mut clear = false;
+                        for (stick, name) in [(0, "Left"), (1, "Right")] {
+                            let [mx, my] = trace.min_nonzero[stick];
+                            let show = |m: u16| if m == u16::MAX { "-".to_string() } else { m.to_string() };
+                            ui.label(format!(
+                                "{name}: smallest non-zero X {}, Y {}",
+                                show(mx),
+                                show(my)
+                            ));
+                            match trace.snap_zone(stick) {
+                                Some(z) => {
+                                    ui.label(format!("{name} stick snaps: zone of about {z}"));
+                                    if ui.button(format!("Use {z} as {name} snap correction")).clicked() {
+                                        let field = if stick == 0 {
+                                            &mut self.preset.left_snap_zone
+                                        } else {
+                                            &mut self.preset.right_snap_zone
+                                        };
+                                        *field = z;
+                                    }
+                                }
+                                None => {
+                                    ui.label(format!("{name} stick: no snapping seen (yet)"));
+                                }
+                            }
+                        }
+                        if ui.button("Clear traces").clicked() {
+                            clear = true;
+                        }
+                        ui.label(RichText::new(SNAP_HELP).small());
+                        if clear {
+                            *trace = pad::Trace::default();
+                        }
                     });
                 });
             });
@@ -634,9 +696,17 @@ impl App {
                         } else {
                             row("Xbox details", "waiting (sent once a second)".into());
                         }
+                        row("Packets/s received (PC)", format!("{:.0}", v.rate));
+                        // Same gap measured on both ends: if the Xbox side is already long, the
+                        // controller (or polling) caused it; if only the PC side is, the network did.
+                        let xbox_gap = v.info.and_then(|i| i.worst_gap);
                         row(
-                            "Packets/s received (PC)",
-                            format!("{:.0}, longest gap {:.1} ms", v.rate, ms(v.worst_gap)),
+                            "Longest gap between updates (last second)",
+                            format!(
+                                "{} at the controller (Xbox), {:.1} ms at the PC",
+                                xbox_gap.map_or("-".into(), |g| format!("{:.1} ms", ms(g))),
+                                ms(v.worst_gap)
+                            ),
                         );
                         row("Lost packets", v.lost.to_string());
                         row(
@@ -913,5 +983,48 @@ fn stick_plot(ui: &mut Ui, label: &str, raw: (i16, i16), out: (i16, i16), deadzo
             .monospace()
             .small(),
         );
+    });
+}
+
+/// Where the stick has been: rotate it to see its gate, and gaps along the axes where the
+/// controller snaps. The shaded bands show the snap correction currently set.
+fn trace_plot(ui: &mut Ui, label: &str, pts: &std::collections::VecDeque<(i16, i16)>, zone: u16) {
+    ui.vertical(|ui| {
+        ui.label(label);
+        let size = 170.0;
+        let (rect, _) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
+        let p = ui.painter_at(rect);
+        let vis = ui.visuals();
+        let (c, r) = (rect.center(), size / 2.0 - 4.0);
+        p.circle_stroke(c, r, Stroke::new(1.0, vis.weak_text_color()));
+        let band = r * zone as f32 / 32767.0;
+        if band > 0.0 {
+            let shade = ERROR.gamma_multiply(0.15);
+            p.rect_filled(
+                Rect::from_center_size(c, vec2(band * 2.0, r * 2.0)),
+                CornerRadius::ZERO,
+                shade,
+            );
+            p.rect_filled(
+                Rect::from_center_size(c, vec2(r * 2.0, band * 2.0)),
+                CornerRadius::ZERO,
+                shade,
+            );
+        }
+        p.line_segment(
+            [c - vec2(r, 0.0), c + vec2(r, 0.0)],
+            Stroke::new(0.5, vis.weak_text_color()),
+        );
+        p.line_segment(
+            [c - vec2(0.0, r), c + vec2(0.0, r)],
+            Stroke::new(0.5, vis.weak_text_color()),
+        );
+        let at = |v: &(i16, i16)| c + vec2(v.0 as f32 / 32767.0 * r, -(v.1 as f32) / 32767.0 * r);
+        for pt in pts {
+            p.circle_filled(at(pt), 1.5, vis.weak_text_color());
+        }
+        if let Some(last) = pts.back() {
+            p.circle_filled(at(last), 4.0, vis.selection.bg_fill);
+        }
     });
 }

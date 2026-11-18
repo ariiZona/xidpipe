@@ -68,6 +68,10 @@ pub struct Preset {
     pub analog_deadzone: u8,
     pub left_stick_deadzone: u16,
     pub right_stick_deadzone: u16,
+    /// Size of a per-axis dead zone the controller applies itself (0 = none). Values just
+    /// outside it are rescaled to start at 0, so the stick no longer jumps at its edge.
+    pub left_snap_zone: u16,
+    pub right_snap_zone: u16,
     /// First vJoy device to use (backend = "vjoy")
     pub vjoy_device: u8,
     /// Vibration strength in percent: scales both motors, so it is also the maximum (0 = off)
@@ -85,6 +89,8 @@ impl Default for Preset {
             analog_deadzone: 30,
             left_stick_deadzone: 7849,
             right_stick_deadzone: 8689,
+            left_snap_zone: 0,
+            right_snap_zone: 0,
             vjoy_device: 1,
             rumble_strength: 100,
             map: BTreeMap::new(),
@@ -187,17 +193,20 @@ pub struct Profile {
     press: u8,
     analog_dz: u8,
     stick_dz: [u16; 2],
+    snap_zone: [u16; 2],
     map: Vec<(Target, Src)>,
 }
 
 impl Profile {
     pub fn new(p: &Preset) -> Result<Profile, String> {
         for (k, dz) in [
-            ("left", p.left_stick_deadzone),
-            ("right", p.right_stick_deadzone),
+            ("left_stick_deadzone", p.left_stick_deadzone),
+            ("right_stick_deadzone", p.right_stick_deadzone),
+            ("left_snap_zone", p.left_snap_zone),
+            ("right_snap_zone", p.right_snap_zone),
         ] {
             if dz > 32000 {
-                return Err(format!("{k}_stick_deadzone must be 0..=32000, got {dz}"));
+                return Err(format!("{k} must be 0..=32000, got {dz}"));
             }
         }
         if p.rumble_strength > 100 {
@@ -237,13 +246,16 @@ impl Profile {
             press: p.press_threshold,
             analog_dz: p.analog_deadzone,
             stick_dz: [p.left_stick_deadzone, p.right_stick_deadzone],
+            snap_zone: [p.left_snap_zone, p.right_snap_zone],
             map,
         })
     }
 
     pub fn apply(&self, x: &Xid) -> Out {
-        let (lx, ly) = stick(x.sticks[0], x.sticks[1], self.stick_dz[0]);
-        let (rx, ry) = stick(x.sticks[2], x.sticks[3], self.stick_dz[1]);
+        let [s0, s1, s2, s3] = x.sticks;
+        let [zl, zr] = self.snap_zone;
+        let (lx, ly) = stick(unsnap(s0, zl), unsnap(s1, zl), self.stick_dz[0]);
+        let (rx, ry) = stick(unsnap(s2, zr), unsnap(s3, zr), self.stick_dz[1]);
         let sticks = [lx, ly, rx, ry];
         let mut o = Out::default();
         for &(t, s) in &self.map {
@@ -292,6 +304,20 @@ fn dz8(v: u8, t: u8) -> u8 {
     }
 }
 
+/// Undo the jump of a controller's own per-axis dead zone of size `zone`: the controller sends
+/// 0 inside it and the real value outside, so values outside are rescaled to start from 0.
+/// What happens inside the zone can't be recovered; the controller never sends it.
+fn unsnap(v: i16, zone: u16) -> i16 {
+    let (a, z) = ((v as i32).abs(), zone as i32);
+    if z == 0 || a == 0 {
+        return v;
+    }
+    if a <= z {
+        return 0;
+    }
+    ((a - z) * 32767 / (32767 - z) * (v as i32).signum()).clamp(-32768, 32767) as i16
+}
+
 /// Scaled radial deadzone: no output inside `dz`, full range outside it.
 fn stick(x: i16, y: i16, dz: u16) -> (i16, i16) {
     if dz == 0 {
@@ -304,6 +330,55 @@ fn stick(x: i16, y: i16, dz: u16) -> (i16, i16) {
     }
     let s = ((m - dz as f32) / (32767.0 - dz as f32)).min(1.0) * 32767.0 / m;
     ((fx * s) as i16, (fy * s) as i16) // float->int `as` saturates
+}
+
+/// Recent raw stick positions and the smallest non-zero value seen per axis, for the
+/// Button tester's trace and its snap-zone measurement.
+#[cfg_attr(test, allow(dead_code))] // the window is left out of test builds
+pub struct Trace {
+    pub points: [std::collections::VecDeque<(i16, i16)>; 2],
+    /// [stick][axis]: smallest non-zero |value| seen (u16::MAX = none yet)
+    pub min_nonzero: [[u16; 2]; 2],
+}
+
+const TRACE_POINTS: usize = 600;
+
+impl Default for Trace {
+    fn default() -> Self {
+        Trace {
+            points: Default::default(),
+            min_nonzero: [[u16::MAX; 2]; 2],
+        }
+    }
+}
+
+#[cfg_attr(test, allow(dead_code))]
+impl Trace {
+    pub fn add(&mut self, x: &Xid) {
+        for (stick, pts) in self.points.iter_mut().enumerate() {
+            let p = (x.sticks[stick * 2], x.sticks[stick * 2 + 1]);
+            if pts.back() != Some(&p) {
+                if pts.len() == TRACE_POINTS {
+                    pts.pop_front();
+                }
+                pts.push_back(p);
+            }
+            for (axis, v) in [p.0, p.1].into_iter().enumerate() {
+                let a = v.unsigned_abs();
+                if a != 0 {
+                    let m = &mut self.min_nonzero[stick][axis];
+                    *m = (*m).min(a);
+                }
+            }
+        }
+    }
+
+    /// The controller's own per-axis dead zone, if the trace shows one: no axis ever reported
+    /// a small non-zero value. Small minimums are just sensor resolution.
+    pub fn snap_zone(&self, stick: usize) -> Option<u16> {
+        let m = self.min_nonzero[stick][0].min(self.min_nonzero[stick][1]);
+        (m != u16::MAX && m > 1024).then_some(m - 1)
+    }
 }
 
 #[cfg(test)]
@@ -438,6 +513,42 @@ map = { sl1 = \"a\" }",
         assert_eq!(stick(-32768, -32768, 8000), (-23169, -23169));
         let (x, _) = stick(32767, 0, 8000);
         assert_eq!(x, 32767);
+    }
+
+    #[test]
+    fn trace_finds_snap_zone() {
+        let mut t = Trace::default();
+        assert_eq!(t.snap_zone(0), None);
+        for s in [
+            [0, 32000, 0, 0],
+            [2560, 31000, 300, 0],
+            [0, -32000, -256, 0],
+            [-2816, 0, 0, 0],
+        ] {
+            t.add(&Xid {
+                sticks: s,
+                ..Xid::default()
+            });
+        }
+        assert_eq!(t.min_nonzero[0], [2560, 31000]);
+        assert_eq!(t.snap_zone(0), Some(2559)); // left never reported anything below 2560
+        assert_eq!(t.snap_zone(1), None); // right reported 256: just sensor resolution
+        assert_eq!(t.points[0].len(), 4);
+    }
+
+    #[test]
+    fn snap_zone_correction() {
+        assert_eq!(unsnap(5000, 0), 5000);
+        assert_eq!(unsnap(0, 3000), 0);
+        assert_eq!(unsnap(3000, 3000), 0);
+        assert_eq!(unsnap(3001, 3000), 1); // just past the zone: starts at 0, no jump
+        assert_eq!(unsnap(-3100, 3000), -110);
+        assert_eq!(unsnap(32767, 3000), 32767);
+        assert_eq!(unsnap(-32768, 3000), -32768);
+        let p = preset("left_stick_deadzone = 0\nleft_snap_zone = 4000");
+        let o = p.apply(&parse(&report(0, [0; 8], [4100, 32767, 0, 0])));
+        assert_eq!(&o.sticks[..2], &[113, 32767]);
+        assert!(Profile::new(&toml::from_str("right_snap_zone = 40000").unwrap()).is_err());
     }
 
     #[test]
