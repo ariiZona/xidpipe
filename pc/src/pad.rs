@@ -417,25 +417,15 @@ mod tests {
         for p in crate::BUILTIN {
             Profile::new(&toml::from_str(p.1).unwrap()).unwrap();
         }
+        // Every setting in xbox.toml equals the default. Its map only spells out default mappings.
         let x: Preset = toml::from_str(crate::BUILTIN[0].1).unwrap();
         let d = Preset::default();
         assert_eq!(
-            (
-                x.backend,
-                x.pressure,
-                x.press_threshold,
-                x.analog_deadzone,
-                x.left_stick_deadzone,
-                x.right_stick_deadzone
-            ),
-            (
-                d.backend,
-                d.pressure,
-                d.press_threshold,
-                d.analog_deadzone,
-                d.left_stick_deadzone,
-                d.right_stick_deadzone
-            )
+            Preset {
+                map: d.map.clone(),
+                ..x
+            },
+            d
         );
     }
 

@@ -93,6 +93,9 @@ static void test_resolve(void)
     CHECK(ftp_resolve("/", "Apps", ftp, dos) == FTP_BAD);
     CHECK(ftp_resolve("/", "/EE/x", ftp, dos) == FTP_BAD);
     CHECK(ftp_resolve("/", "/1/x", ftp, dos) == FTP_BAD);
+    // Only the dashboard drives: Q: is xidpipe's own folder under a second name
+    CHECK(ftp_resolve("/", "/Q/default.xbe", ftp, dos) == FTP_BAD);
+    CHECK(ftp_resolve("/", "/q", ftp, dos) == FTP_BAD);
     // No "C:" forms or alternate streams
     CHECK(ftp_resolve("/", "C:\\xboxdash.xbe", ftp, dos) == FTP_BAD);
     CHECK(ftp_resolve("/E", "file.txt:stream", ftp, dos) == FTP_BAD);

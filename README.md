@@ -128,7 +128,8 @@ and the old XBE is kept until the new one is in place.
 - uploads are buffered and written in the background, like xemu-dashboard does, to keep transfers fast;
 - an upload only replaces a file once it has arrived completely; a cut-off transfer changes nothing;
 - uploading a new copy of the running XBE (normally `default.xbe` in xidpipe's folder) checks it, installs
-  it the same safe way as an update, and restarts xidpipe. You can't delete or rename the running XBE.
+  it the same safe way as an update, and restarts xidpipe. You can't delete or rename the running XBE
+  or rename the folders it's in.
 
 Like any Xbox FTP server it can change everything, including `C:` with the dashboard and system files.
 Be careful there.

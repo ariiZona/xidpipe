@@ -33,7 +33,7 @@
 #define PAGE 4096
 
 // Drives listed at "/", in this order (only the ones that can be read right now are shown).
-static const char DRIVES[] = "CDEFGXYZ";
+static const char DRIVES[] = XP_DRIVES;
 
 static volatile long clients;
 static volatile int enabled;
@@ -106,6 +106,14 @@ static int resolve(const session_t *s, const char *arg, char *ftp_out, char *dos
 static int is_self(const char *dos)
 {
     return self_xbe_real_path()[0] != 0 && _stricmp(dos, self_xbe_real_path()) == 0;
+}
+
+// The running XBE, or a folder it's in.
+static int holds_self(const char *dos)
+{
+    const char *self = self_xbe_real_path();
+    size_t n = strlen(dos);
+    return self[0] != 0 && _strnicmp(self, dos, n) == 0 && (self[n] == 0 || self[n] == '\\');
 }
 
 static int is_dir(const char *dos)
@@ -529,7 +537,7 @@ static void handle(session_t *s, char *cmd, char *arg)
         int ok = resolve(s, arg, ftp, dos) == FTP_PATH && strlen(dos) > 3 && RemoveDirectoryA(dos);
         reply(s, ok ? "250 Removed" : "550 Can't remove that folder");
     } else if (!_stricmp(cmd, "RNFR")) {
-        if (resolve(s, arg, ftp, dos) == FTP_PATH && strlen(dos) > 3 && !is_self(dos) &&
+        if (resolve(s, arg, ftp, dos) == FTP_PATH && strlen(dos) > 3 && !holds_self(dos) &&
             GetFileAttributesA(dos) != INVALID_FILE_ATTRIBUTES) {
             snprintf(s->rnfr, sizeof(s->rnfr), "%s", dos);
             reply(s, "350 Ready for RNTO");

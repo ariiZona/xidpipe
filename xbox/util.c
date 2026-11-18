@@ -9,6 +9,11 @@ static int ascii_lower(int c)
     return c >= 'A' && c <= 'Z' ? c + 32 : c;
 }
 
+static int ascii_upper(int c)
+{
+    return c >= 'a' && c <= 'z' ? c - 32 : c;
+}
+
 static int prefix_nocase(const char *s, const char *prefix, size_t n)
 {
     for (size_t i = 0; i < n; i++) {
@@ -189,12 +194,9 @@ int ftp_resolve(const char *cwd, const char *arg, char *ftp_out, char *dos_out)
         return FTP_ROOT;
     }
     // "/E" or "/E/...": the first part is the drive letter.
-    char drive = norm[1];
-    if (!((drive >= 'A' && drive <= 'Z') || (drive >= 'a' && drive <= 'z')) || (norm[2] != 0 && norm[2] != '/')) {
+    char drive = (char)ascii_upper((unsigned char)norm[1]);
+    if (drive == 0 || strchr(XP_DRIVES, drive) == NULL || (norm[2] != 0 && norm[2] != '/')) {
         return FTP_BAD;
-    }
-    if (drive >= 'a') {
-        drive = (char)(drive - 32);
     }
     norm[1] = drive;
     snprintf(ftp_out, XP_PATH_MAX, "%s", norm);
