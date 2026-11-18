@@ -1,6 +1,6 @@
 [package]
 name = "xidpipe"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Use an original Xbox controller (incl. 3rd-party) on a PC, through a homebrew Xbox over the network"
 license = "GPL-3.0-or-later"

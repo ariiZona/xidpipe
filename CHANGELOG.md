@@ -2,7 +2,10 @@
 
 Each release's notes on GitHub are taken from its section here.
 
-## Unreleased
+## v0.1.1
+
+Tested on real hardware: the Pelican pad from v0.1.0, found automatically on a Windows PC with nine network
+adapters, playing through xemu and xbased with no setup. The `zero` preset (no deadzone) worked well there.
 
 - Finding the Xbox works on PCs with several network adapters (VPN, WSL/Hyper-V, VirtualBox, ZeroTier, …):
   the hello also goes to each network's own broadcast address and to the address where the Xbox was last
