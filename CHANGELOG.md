@@ -2,6 +2,17 @@
 
 Each release's notes on GitHub are taken from its section here.
 
+## v0.2.3
+
+Not tested on hardware: CI builds and unit tests only.
+
+- Xbox FTP: paths only reach the dashboard drives (C D E F G X Y Z). `Q:`, xidpipe's own folder under a
+  second name, could delete the running XBE or replace it without the XBE check.
+- Xbox FTP: a folder that holds the running XBE can't be renamed any more. Renaming it turned off the
+  running XBE's delete protection and broke updates.
+- Xbox rumble: a rumble write the controller fails is sent again every 250 ms. Before, a lost "motors
+  off" could leave the motors running until the next rumble.
+
 ## v0.2.2
 
 Tested on real hardware: the self-update from GitHub, FTP self-install, and the network round trip
