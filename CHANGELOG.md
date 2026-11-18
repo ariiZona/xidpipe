@@ -2,7 +2,10 @@
 
 Each release's notes on GitHub are taken from its section here.
 
-## Unreleased
+## v0.2.2
+
+Tested on real hardware: the self-update from GitHub, FTP self-install, and the network round trip
+(back to ~0.12 ms in the Debug tab).
 
 - PC app: the Debug tab's network round trip read ~3 ms since v0.1.1 instead of the real ~0.1 ms. Listing
   the PC's network adapters (for finding the Xbox) happened between taking the timestamp and sending, and
