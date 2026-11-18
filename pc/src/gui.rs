@@ -72,6 +72,8 @@ pub fn run() -> Result<(), String> {
         applied: (preset.clone(), String::new(), 0),
         poll_hz: 0,
         tab: Tab::Setup,
+        test_power: 50,
+        test_ms: 700,
         name,
         preset,
         xbox_ip: String::new(),
@@ -98,6 +100,9 @@ struct App {
     applied: (Preset, String, u16),
     poll_hz: u16,
     tab: Tab,
+    /// Debug tab rumble test: power (%) and length (ms)
+    test_power: u8,
+    test_ms: u16,
     xbox_ip: String,
     save_as: String,
     /// Result of the last load/save: (text, is error)
@@ -594,16 +599,28 @@ impl App {
                         row("USB id", format!("{:04x}:{:04x}", v.vid, v.pid));
                         if let Some(i) = v.info {
                             row("XID type", xid_label(i.xid));
+                            let poll_hz = 1000 / i.interval.max(1) as u32;
                             row(
                                 "Polling",
                                 format!(
-                                    "controller asks every {} ms, polled every {} ms ({} Hz)",
-                                    i.dev_interval,
-                                    i.interval,
-                                    1000 / i.interval.max(1) as u32
+                                    "every {} ms ({poll_hz} Hz); the controller asks for {} ms",
+                                    i.interval, i.dev_interval
                                 ),
                             );
-                            row("USB reports/s (Xbox)", i.reports_per_s.to_string());
+                            // A controller only has new data at its own internal rate; polling
+                            // faster can't add reports, it only shortens how long each one waits.
+                            let limited = (i.reports_per_s as u32) * 10 < poll_hz * 9;
+                            row(
+                                "Controller updates/s",
+                                if limited {
+                                    format!(
+                                        "{} (the controller's own limit; each update now waits at most {} ms to be read)",
+                                        i.reports_per_s, i.interval
+                                    )
+                                } else {
+                                    i.reports_per_s.to_string()
+                                },
+                            );
                             row("USB errors", i.usb_errors.to_string());
                             row(
                                 "Rumble motors",
@@ -644,18 +661,23 @@ impl App {
                             row("Backend error", e.clone());
                         }
                     });
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.label("Test rumble:");
-                    let half = 0x8000;
+                    ui.add(egui::Slider::new(&mut self.test_power, 1..=100).text("power").suffix("%"))
+                        .on_hover_text("The preset's vibration strength still applies on top of this.");
+                    ui.add(egui::Slider::new(&mut self.test_ms, 100..=3000).text("length").suffix(" ms"));
+                    let p = self.test_power as u32 * 65535 / 100;
+                    let p = p as u16;
                     let tests = [
-                        ("Left motor", (half, 0)),
-                        ("Right motor", (0, half)),
-                        ("Both, full", (0xffff, 0xffff)),
+                        ("Left motor", (p, 0)),
+                        ("Right motor", (0, p)),
+                        ("Both", (p, p)),
                         ("Stop", (0, 0)),
                     ];
                     for (label, level) in tests {
                         if ui.button(label).clicked() {
-                            let time = Duration::from_millis(if level == (0, 0) { 0 } else { 700 });
+                            let ms = if level == (0, 0) { 0 } else { self.test_ms as u64 };
+                            let time = Duration::from_millis(ms);
                             let _ = self.tx.send(Command::TestRumble {
                                 pad: id,
                                 level,
