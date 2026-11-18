@@ -18,7 +18,8 @@ OG controller --USB--> Xbox (xbox/, nxdk homebrew) --UDP, LAN--> PC (pc/, Rust) 
 
 **Tested on real hardware so far:** one 3rd-party Pelican pad (reports itself as `ffff:ffff`, rejected by
 XBlast OS and Gentoox) on Windows, playing through xemu and xbased. The Xbox app's FTP server and update
-check (new in v0.2) haven't been tested on hardware yet. Everything else is only built and unit-tested by CI.
+check (new in v0.2) work on that setup too: an update from GitHub installed itself, and an FTP upload of
+`default.xbe` installed and restarted xidpipe. Everything else is only built and unit-tested by CI.
 
 ## What you need
 
@@ -132,12 +133,16 @@ and the old XBE is kept until the new one is in place.
 Like any Xbox FTP server it can change everything, including `C:` with the dashboard and system files.
 Be careful there.
 
+**Xbox menu.** Hold **Back** for 10 seconds on any controller to open xidpipe's menu on the Xbox screen:
+turn the FTP server on or off (remembered across restarts), reboot, or shut down the Xbox. D-pad moves, A
+chooses, B closes. While the menu is open, the PC gets a controller with nothing pressed.
+
 **Turning them off.** Create an empty file in xidpipe's folder on the Xbox:
 
 | file name | effect |
 |---|---|
 | `no-update-check` | no update check (the Xbox never contacts GitHub) |
-| `no-ftp` | no FTP server |
+| `no-ftp` | no FTP server (the menu's FTP switch creates and removes this file) |
 
 Anyone on your network who knows `xbox`/`xbox` (every Xbox FTP server uses it) can use the FTP server while
 xidpipe runs, so use `no-ftp` on networks you don't trust.

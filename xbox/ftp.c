@@ -36,6 +36,18 @@
 static const char DRIVES[] = "CDEFGXYZ";
 
 static volatile long clients;
+static volatile int enabled;
+
+int ftp_is_enabled(void)
+{
+    return enabled;
+}
+
+void ftp_set_enabled(int on)
+{
+    set_marker("no-ftp", !on);
+    enabled = on;
+}
 
 typedef struct {
     int ctrl;
@@ -539,9 +551,17 @@ static void serve(session_t *s)
 {
     reply(s, "220 xidpipe " XIDPIPE_VERSION " FTP ready (user xbox, password xbox)");
     for (;;) {
-        if (!readable(s->ctrl, IDLE_TIMEOUT_S)) {
-            reply(s, "421 Idle too long");
-            return;
+        // Wake every second, so turning the server off in the menu disconnects clients.
+        int idle = 0;
+        while (!readable(s->ctrl, 1)) {
+            if (!enabled) {
+                reply(s, "421 The FTP server was turned off");
+                return;
+            }
+            if (++idle >= IDLE_TIMEOUT_S) {
+                reply(s, "421 Idle too long");
+                return;
+            }
         }
         int n = lwip_recv(s->ctrl, s->line + s->line_len, sizeof(s->line) - 1 - s->line_len, 0);
         if (n <= 0) {
@@ -587,9 +607,8 @@ static DWORD WINAPI session_thread(LPVOID arg)
     return 0;
 }
 
-static DWORD WINAPI ftp_thread(LPVOID arg)
+static int open_listener(void)
 {
-    (void)arg;
     int lfd = lwip_socket(AF_INET, SOCK_STREAM, 0);
     struct sockaddr_in a;
     memset(&a, 0, sizeof(a));
@@ -597,11 +616,42 @@ static DWORD WINAPI ftp_thread(LPVOID arg)
     a.sin_port = lwip_htons(FTP_PORT);
     a.sin_addr.s_addr = INADDR_ANY;
     if (lfd < 0 || lwip_bind(lfd, (struct sockaddr *)&a, sizeof(a)) != 0 || lwip_listen(lfd, MAX_CLIENTS) != 0) {
-        say("FTP server couldn't start on port %d.", FTP_PORT);
-        return 0;
+        if (lfd >= 0) {
+            lwip_close(lfd);
+        }
+        return -1;
     }
-    say("FTP server on port %d: user xbox, password xbox.", FTP_PORT);
+    return lfd;
+}
+
+// Listens while the server is on; the menu can switch it at any time.
+static DWORD WINAPI ftp_thread(LPVOID arg)
+{
+    (void)arg;
+    int lfd = -1, failed = 0;
     for (;;) {
+        if (enabled && lfd < 0 && !failed) {
+            lfd = open_listener();
+            if (lfd < 0) {
+                failed = 1; // tell once; retried after the next off/on
+                say("FTP server couldn't start on port %d.", FTP_PORT);
+            } else {
+                say("FTP server on port %d: user xbox, password xbox.", FTP_PORT);
+            }
+        } else if (!enabled && (lfd >= 0 || failed)) {
+            if (lfd >= 0) {
+                lwip_close(lfd);
+                lfd = -1;
+                say("FTP server is off.");
+            }
+            failed = 0;
+        }
+        if (lfd < 0 || !readable(lfd, 1)) {
+            if (lfd < 0) {
+                Sleep(500);
+            }
+            continue;
+        }
         int c = lwip_accept(lfd, NULL, NULL);
         if (c < 0) {
             Sleep(100);
@@ -631,9 +681,9 @@ static DWORD WINAPI ftp_thread(LPVOID arg)
 
 void ftp_start(void)
 {
-    if (marker_exists("no-ftp")) {
-        say("FTP server is off (no-ftp file).");
-        return;
+    enabled = !marker_exists("no-ftp");
+    if (!enabled) {
+        say("FTP server is off (turn it on in the menu: hold Back for 10 s).");
     }
     HANDLE t = CreateThread(NULL, 32 * 1024, ftp_thread, NULL, 0, NULL);
     if (t != NULL) {

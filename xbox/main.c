@@ -77,6 +77,9 @@ static pad_t pads[MAX_PADS];
 static uint32_t seqs[16]; // per pad id; never reset, so the PC can drop stale packets
 static KEVENT wake;
 static CRITICAL_SECTION screen_lock;
+#define LOG_LINES 24
+static char log_lines[LOG_LINES][160];
+static int log_next, screen_paused;
 static char self_path[MAX_PATH]; // "Q:\default.xbe" (Q: is the XBE's own folder)
 static char self_real[MAX_PATH]; // the same file on its real drive, e.g. "E:\Apps\xidpipe\default.xbe"
 static ULONGLONG perf_hz;
@@ -110,8 +113,47 @@ void say(const char *fmt, ...)
         b[n] = 0;
     }
     EnterCriticalSection(&screen_lock);
-    debugPrint("%s", b);
+    snprintf(log_lines[log_next], sizeof(log_lines[0]), "%s", b);
+    log_next = (log_next + 1) % LOG_LINES;
+    if (!screen_paused) {
+        debugPrint("%s", b);
+    }
     LeaveCriticalSection(&screen_lock);
+}
+
+void screen_pause(void)
+{
+    EnterCriticalSection(&screen_lock);
+    screen_paused = 1;
+    LeaveCriticalSection(&screen_lock);
+}
+
+void screen_resume(void)
+{
+    EnterCriticalSection(&screen_lock);
+    screen_paused = 0;
+    debugClearScreen();
+    for (int i = 0; i < LOG_LINES; i++) {
+        const char *line = log_lines[(log_next + i) % LOG_LINES];
+        if (line[0]) {
+            debugPrint("%s", line);
+        }
+    }
+    LeaveCriticalSection(&screen_lock);
+}
+
+void set_marker(const char *name, int present)
+{
+    char path[MAX_PATH];
+    snprintf(path, sizeof(path), "Q:\\%s", name);
+    if (!present) {
+        DeleteFileA(path);
+        return;
+    }
+    HANDLE f = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f != INVALID_HANDLE_VALUE) {
+        CloseHandle(f);
+    }
 }
 
 const char *self_xbe_path(void)
@@ -282,6 +324,12 @@ static void send_pad(pad_t *p, uint8_t type)
         memcpy(b + HEADER, p->report, len);
         p->sent_gen = p->gen;
         KfLowerIrql(irql);
+        if (menu_open) {
+            // The menu is using the controller: the PC gets one with nothing pressed.
+            len = 20;
+            memset(b + HEADER, 0, len);
+            b[HEADER + 1] = 20;
+        }
     }
     p->sent_at = GetTickCount();
 
@@ -705,15 +753,22 @@ int main(void)
             update_rumble(p, rumble[p->id & 15]);
         }
 
+        // All pads' buttons together, for the menu and the update prompt.
+        uint8_t digital = 0;
+        int a = 0, b = 0;
+        for (int i = 0; i < MAX_PADS; i++) {
+            if (pads[i].iface != NULL && pads[i].len >= 6) {
+                digital |= pads[i].report[2];
+                a |= pads[i].report[4] > 0x40;
+                b |= pads[i].report[5] > 0x40;
+            }
+        }
+        if (menu_update(digital, a, b, now)) {
+            continue; // the menu has the controller
+        }
+
         // A downloaded update waits for the user: hold A for 2 s on any pad to install it, B to skip.
         if (update_state == UPDATE_READY) {
-            int a = 0, b = 0;
-            for (int i = 0; i < MAX_PADS; i++) {
-                if (pads[i].iface != NULL && pads[i].len >= 6) {
-                    a |= pads[i].report[4] > 0x40;
-                    b |= pads[i].report[5] > 0x40;
-                }
-            }
             if (b) {
                 update_state = UPDATE_NONE;
                 DeleteFileA(update_file);

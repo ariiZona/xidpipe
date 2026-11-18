@@ -4,6 +4,9 @@ Each release's notes on GitHub are taken from its section here.
 
 ## Unreleased
 
+- Xbox menu: hold Back for 10 seconds to turn the FTP server on or off, reboot or shut down the Xbox.
+  The PC gets a neutral controller while it's open.
+- Confirmed on hardware: the update check installed a GitHub release by itself.
 - Fixed the Xbox update check failing with "unreadable answer": the Xbox's C library doesn't support
   the `sscanf` format used to read HTTP status lines, so status and version parsing no longer use it.
 - Xbox update check: every failure now says exactly what went wrong (name lookup, connection, TLS

@@ -2,7 +2,7 @@
 # Output: bin/default.xbe and xidpipe.iso
 XBE_TITLE = xidpipe
 GEN_XISO = $(XBE_TITLE).iso
-SRCS = $(CURDIR)/main.c $(CURDIR)/ftp.c $(CURDIR)/update.c $(CURDIR)/util.c
+SRCS = $(CURDIR)/main.c $(CURDIR)/ftp.c $(CURDIR)/update.c $(CURDIR)/util.c $(CURDIR)/menu.c
 NXDK_NET = y
 NXDK_DIR ?= $(CURDIR)/nxdk
 
@@ -35,7 +35,7 @@ $(CURDIR)/bearssl.lib: $(BEARSSL_OBJS)
 main.exe: $(CURDIR)/bearssl.lib
 
 # The version reaches the code through CFLAGS, which make doesn't track: rebuild on a version bump.
-$(CURDIR)/main.obj $(CURDIR)/ftp.obj $(CURDIR)/update.obj: $(CURDIR)/../pc/Cargo.toml
+$(CURDIR)/main.obj $(CURDIR)/ftp.obj $(CURDIR)/update.obj $(CURDIR)/menu.obj: $(CURDIR)/../pc/Cargo.toml
 
 CLEANRULES += clean-bearssl
 .PHONY: clean-bearssl

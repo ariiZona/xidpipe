@@ -20,6 +20,7 @@ Two programs that talk over UDP:
 |---|---|
 | `xbox/main.c` | Xbox app core: USB probe/driver, DPC callbacks, lwIP UDP, polling, rumble, update prompt, `say()` |
 | `xbox/ftp.c` | dashboard-style FTP server for all drives, xbox/xbox (modelled on xemu-dashboard's; one thread per client) |
+| `xbox/menu.c` | hold-Back menu on the Xbox screen (FTP on/off, reboot, shut down) |
 | `xbox/update.c` | update check and download over HTTPS with BearSSL (own thread) |
 | `xbox/util.c` | platform-free helpers (HTTP/JSON parsing, version compare, FTP path mapping), unit-tested |
 | `xbox/tests/util_test.c` | host-side tests for `util.c` |
