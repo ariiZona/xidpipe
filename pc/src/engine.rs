@@ -265,17 +265,22 @@ pub fn run(
 
         if last_hello.elapsed() >= HELLO_EVERY {
             // Errors here (no route yet, etc.) are retried next second.
-            let ping = start.elapsed().as_micros() as u32;
-            let hello = hello_packet(poll_ms(settings.poll_hz), ping);
             let live = peer
                 .filter(|_| peer_seen.elapsed() < PEER_FRESH)
                 .map(|p| p.ip());
-            let targets = hello_targets(settings.xbox, live, settings.hint, &local_ipv4s());
-            if live.is_none() && targets != searching_via {
+            // Listing network adapters takes milliseconds on Windows: only do it while searching,
+            // never while the Xbox is connected (it would stall input handling).
+            let searching = settings.xbox.is_none() && live.is_none();
+            let local = if searching { local_ipv4s() } else { Vec::new() };
+            let targets = hello_targets(settings.xbox, live, settings.hint, &local);
+            if searching && targets != searching_via {
                 let list: Vec<String> = targets.iter().map(|t| t.to_string()).collect();
                 say(format!("looking for the Xbox via {}", list.join(", ")));
                 searching_via = targets.clone();
             }
+            // Timestamp last, just before sending, so the round trip measures only the network.
+            let ping = start.elapsed().as_micros() as u32;
+            let hello = hello_packet(poll_ms(settings.poll_hz), ping);
             for ip in targets {
                 let _ = sock.send_to(&hello, (ip, XBOX_PORT));
             }

@@ -4,6 +4,10 @@ Each release's notes on GitHub are taken from its section here.
 
 ## Unreleased
 
+- PC app: the Debug tab's network round trip read ~3 ms since v0.1.1 instead of the real ~0.1 ms. Listing
+  the PC's network adapters (for finding the Xbox) happened between taking the timestamp and sending, and
+  it also paused input handling for a few milliseconds once a second. Adapters are now only listed while
+  searching for the Xbox, and the timestamp is taken right before sending.
 - Xbox menu: hold Back for 10 seconds to turn the FTP server on or off, reboot or shut down the Xbox.
   The PC gets a neutral controller while it's open.
 - Confirmed on hardware: the update check installed a GitHub release by itself.
