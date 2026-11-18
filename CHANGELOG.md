@@ -5,7 +5,7 @@ Each release's notes on GitHub are taken from its section here.
 ## Unreleased
 
 - macOS is no longer supported or built: it can't create virtual controllers, so the PC app could only
-  show the controller there. Building the Xbox app on a Mac still works.
+  show the controller there.
 
 ## v0.2.1
 

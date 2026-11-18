@@ -25,7 +25,7 @@ check (new in v0.2) haven't been tested on hardware yet. Everything else is only
 - An original Xbox that can run homebrew (softmodded or modchipped), with a dashboard that can launch
   `.xbe` files and has an FTP server (UnleashX, XBMC4Xbox, EvoX, …).
 - The Xbox and the PC on the same network. **Wired Ethernet is best**; Wi-Fi works but adds delay spikes.
-- A PC running Windows or Linux. (macOS isn't supported, see [Platforms](#platforms).)
+- A PC running Windows or Linux.
 
 ## Quick start (no building)
 
@@ -209,8 +209,7 @@ zone can't be undone, because the controller never sends those values.
   Wine/Proton should treat it as an Xbox 360 controller (not tested on Linux yet). `dinput` is a generic gamepad.
   The window needs a normal desktop session (X11 or Wayland with OpenGL).
 - **macOS:** not supported. macOS has no public API for virtual game controllers without an Apple-granted
-  driver entitlement, so the PC app could only ever show the controller, not pass it to games. You can still
-  build the Xbox app on a Mac (see below).
+  driver entitlement, so the PC app could only ever show the controller, not pass it to games.
 - **Xbox network:** the Xbox app uses the network settings saved on the Xbox (a manual IP set in your
   dashboard) if there are any, and DHCP otherwise.
 
@@ -247,8 +246,6 @@ except the ones marked *untested*:
 | Alpine (apk) | `sudo apk add build-base cmake clang bison flex lld git llvm` |
 | Void (xbps) | `sudo xbps-install -S make cmake clang bison flex lld llvm git` *(untested)* |
 | Gentoo (emerge) | `sudo emerge --ask llvm-core/clang llvm-core/lld llvm-core/llvm dev-build/cmake sys-devel/bison sys-devel/flex dev-vcs/git` *(untested)* |
-| macOS, Intel or Apple Silicon (Homebrew) | `xcode-select --install`, then `brew install cmake coreutils lld llvm` |
-| macOS (MacPorts) | not supported by nxdk (MacPorts has no lld package). Use Homebrew |
 | Windows | use MSYS2, below (or WSL with Ubuntu and the apt line) |
 
 **Windows with MSYS2** (tested on this project's development PC):
@@ -264,7 +261,7 @@ except the ones marked *untested*:
    cd /c/src/xidpipe
    ```
 
-**Build** (Linux and macOS terminal, or the MSYS2 MINGW64 window):
+**Build** (Linux terminal, or the MSYS2 MINGW64 window):
 
 ```sh
 cd xbox
