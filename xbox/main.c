@@ -22,6 +22,7 @@
 #include <lwip/pbuf.h>
 #include <lwip/tcpip.h>
 #include <lwip/udp.h>
+#include <lwip/dns.h>
 #include <usbh_lib.h>
 #include <usb.h>
 #include <hub.h>
@@ -613,6 +614,27 @@ int main(void)
         }
     }
     say("Xbox IP: %s  (UDP %d)\n", ip4addr_ntoa(netif_ip4_addr(g_pnetif)), XP_PORT);
+    {
+        // The update check needs DNS. A manual IP set in the dashboard without a DNS server leaves
+        // none: fall back to the router, which answers DNS on most home networks.
+        char dns_text[IPADDR_STRLEN_MAX];
+        LOCK_TCPIP_CORE();
+        const ip_addr_t *dns = dns_getserver(0);
+        int had_dns = dns != NULL && !ip_addr_isany(dns);
+        const ip4_addr_t *gw = netif_ip4_gw(g_pnetif);
+        if (!had_dns && gw != NULL && !ip4_addr_isany(gw)) {
+            ip_addr_t router;
+            ip_addr_copy_from_ip4(router, *gw);
+            dns_setserver(0, &router);
+        }
+        ipaddr_ntoa_r(dns_getserver(0), dns_text, sizeof(dns_text));
+        UNLOCK_TCPIP_CORE();
+        if (had_dns) {
+            say("DNS: %s", dns_text);
+        } else {
+            say("No DNS server set on the Xbox; using the router (%s)", dns_text);
+        }
+    }
     say("Run xidpipe on the PC. If it can't find the Xbox, enter this IP in xidpipe.\n");
     ftp_start();
     update_start();

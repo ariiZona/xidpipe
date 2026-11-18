@@ -209,14 +209,17 @@ static int sock_write(void *ctx, const unsigned char *data, size_t len)
     return n > 0 ? n : -1;
 }
 
+// Connect to host:port. Says why it failed (name lookup or connection) and returns -1 then.
 static int tcp_connect(const char *host, int port)
 {
     struct hostent *he = lwip_gethostbyname(host);
     if (he == NULL || he->h_addr_list[0] == NULL) {
+        say("Update check: can't look up %s. Is a DNS server set on the Xbox?", host);
         return -1;
     }
     int fd = lwip_socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
+        say("Update check: no free network socket");
         return -1;
     }
     struct sockaddr_in a;
@@ -225,6 +228,7 @@ static int tcp_connect(const char *host, int port)
     a.sin_port = lwip_htons(port);
     memcpy(&a.sin_addr, he->h_addr_list[0], 4);
     if (lwip_connect(fd, (struct sockaddr *)&a, sizeof(a)) != 0) {
+        say("Update check: can't connect to %s (%s)", host, ip4addr_ntoa((const ip4_addr_t *)&a.sin_addr));
         lwip_close(fd);
         return -1;
     }
@@ -237,18 +241,16 @@ static unsigned char iobuf[BR_SSL_BUFSIZE_BIDI];
 static char url_buf[4096], path_buf[4096], req_buf[4608];
 
 // GET an https URL, following redirects. On HTTP 200 with a complete body, returns 1 and the
-// body in `out` (malloc'd, with a NUL after it).
+// body in `out` (malloc'd, with a NUL after it). Every failure says why on screen.
 static int https_get(const char *url, buf_t *out, size_t max)
 {
     snprintf(url_buf, sizeof(url_buf), "%s", url);
     for (int redirects = 0; redirects < 6; redirects++) {
-        if (strncmp(url_buf, "https://", 8) != 0) {
-            return 0;
-        }
         char host[256];
         const char *h = url_buf + 8, *slash = strchr(h, '/');
         size_t hl = slash ? (size_t)(slash - h) : strlen(h);
-        if (hl == 0 || hl >= sizeof(host)) {
+        if (strncmp(url_buf, "https://", 8) != 0 || hl == 0 || hl >= sizeof(host)) {
+            say("Update check: unusable address %.60s", url_buf);
             return 0;
         }
         memcpy(host, h, hl);
@@ -257,7 +259,6 @@ static int https_get(const char *url, buf_t *out, size_t max)
 
         int fd = tcp_connect(host, 443);
         if (fd < 0) {
-            say("Update check: can't reach %s", host);
             return 0;
         }
         br_ssl_client_init_full(&sc, &xc, anchors, anchor_count);
@@ -273,25 +274,30 @@ static int https_get(const char *url, buf_t *out, size_t max)
                           "\r\nAccept: */*\r\nConnection: close\r\n\r\n",
                           path_buf, host);
         buf_t resp = {0};
-        int ok = rl > 0 && rl < (int)sizeof(req_buf) && br_sslio_write_all(&io, req_buf, rl) == 0 &&
-                 br_sslio_flush(&io) == 0;
-        while (ok) {
+        int sent = rl > 0 && rl < (int)sizeof(req_buf) && br_sslio_write_all(&io, req_buf, rl) == 0 &&
+                   br_sslio_flush(&io) == 0;
+        int too_big = 0;
+        while (sent) {
             static unsigned char chunk[4096];
             int n = br_sslio_read(&io, chunk, sizeof(chunk));
             if (n < 0) {
                 break;
             }
             if (resp.len + (size_t)n > max + 65536) {
-                ok = 0;
+                too_big = 1;
                 break;
             }
             buf_append(&resp, chunk, n);
         }
+        // TLS error codes are listed in bearssl/inc/bearssl_ssl.h (BR_ERR_*) and bearssl_x509.h.
         int tls_err = br_ssl_engine_last_error(&sc.eng);
         lwip_close(fd);
+        unsigned long got = (unsigned long)resp.len;
         buf_append(&resp, "", 1); // NUL-terminate for string parsing
-        if (!ok || resp.failed || resp.len <= 1) {
-            say("Update check: connection to %s failed (TLS error %d)", host, tls_err);
+        if (!sent || resp.failed || too_big || got == 0) {
+            say("Update check: %s: %s (TLS error %d, %lu bytes)", host,
+                !sent ? "secure connection failed" : too_big ? "response too big" : resp.failed ? "out of memory" : "no answer",
+                tls_err, got);
             free(resp.data);
             return 0;
         }
@@ -301,6 +307,7 @@ static int https_get(const char *url, buf_t *out, size_t max)
         char *body = strstr(r, "\r\n\r\n");
         int status = 0;
         if (body == NULL || sscanf(r, "HTTP/%*s %d", &status) != 1) {
+            say("Update check: %s sent an unreadable answer (%lu bytes, TLS error %d)", host, got, tls_err);
             free(resp.data);
             return 0;
         }
@@ -312,6 +319,7 @@ static int https_get(const char *url, buf_t *out, size_t max)
             int found = http_header(r, "location", url_buf, sizeof(url_buf));
             free(resp.data);
             if (!found) {
+                say("Update check: %s redirected (HTTP %d) without saying where", host, status);
                 return 0;
             }
             continue;
@@ -322,21 +330,25 @@ static int https_get(const char *url, buf_t *out, size_t max)
             return 0;
         }
         char val[64];
+        unsigned long expected = 0;
+        int complete;
         if (http_header(r, "transfer-encoding", val, sizeof(val)) && strstr(val, "chunked") != NULL) {
-            if (!http_dechunk(body, blen, &blen)) {
-                free(resp.data);
-                return 0;
-            }
+            complete = http_dechunk(body, blen, &blen);
         } else if (http_header(r, "content-length", val, sizeof(val))) {
-            if (strtoul(val, NULL, 10) != blen) {
-                free(resp.data); // cut off: never use a partial file
-                return 0;
-            }
-        } else if (tls_err != 0) {
-            free(resp.data); // no length and no clean close: can't tell it's complete
+            expected = strtoul(val, NULL, 10);
+            complete = expected == blen;
+        } else {
+            complete = tls_err == 0; // no length given: only a clean close proves it's all there
+        }
+        if (!complete) {
+            // never use a partial file
+            say("Update check: answer from %s was cut off (%lu of %lu bytes, TLS error %d)", host,
+                (unsigned long)blen, expected, tls_err);
+            free(resp.data);
             return 0;
         }
         if (blen > max) {
+            say("Update check: answer from %s is too big (%lu bytes)", host, (unsigned long)blen);
             free(resp.data);
             return 0;
         }
@@ -346,6 +358,7 @@ static int https_get(const char *url, buf_t *out, size_t max)
         out->len = blen;
         return 1;
     }
+    say("Update check: too many redirects");
     return 0;
 }
 
@@ -376,7 +389,7 @@ static DWORD WINAPI update_thread(LPVOID arg)
     buf_t json = {0};
     char tag[32];
     if (!https_get("https://api.github.com/repos/" XIDPIPE_REPO "/releases/latest", &json, MAX_JSON)) {
-        say("Update check failed (no internet, or GitHub unreachable).");
+        say("Update check failed, see the line above.");
         return 0;
     }
     int found = json_string((char *)json.data, "tag_name", tag, sizeof(tag));

@@ -4,6 +4,10 @@ Each release's notes on GitHub are taken from its section here.
 
 ## Unreleased
 
+- Xbox update check: every failure now says exactly what went wrong (name lookup, connection, TLS
+  error code, HTTP status, cut-off download) instead of a generic message.
+- The Xbox screen shows its DNS server. With a manual IP and no DNS server set in the dashboard, xidpipe
+  now uses the router for DNS, so the update check can reach GitHub.
 - macOS is no longer supported or built: it can't create virtual controllers, so the PC app could only
   show the controller there.
 
