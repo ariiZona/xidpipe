@@ -683,7 +683,8 @@ int main(void)
             say("No DNS server set on the Xbox; using the router (%s)", dns_text);
         }
     }
-    say("Run xidpipe on the PC. If it can't find the Xbox, enter this IP in xidpipe.\n");
+    say("Run xidpipe on the PC. If it can't find the Xbox, enter this IP in xidpipe.");
+    say("Hold Back for 10 seconds for the menu: FTP on/off, reboot, shut down.\n");
     ftp_start();
     update_start();
 
