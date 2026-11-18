@@ -4,6 +4,8 @@ Each release's notes on GitHub are taken from its section here.
 
 ## Unreleased
 
+- Fixed the Xbox update check failing with "unreadable answer": the Xbox's C library doesn't support
+  the `sscanf` format used to read HTTP status lines, so status and version parsing no longer use it.
 - Xbox update check: every failure now says exactly what went wrong (name lookup, connection, TLS
   error code, HTTP status, cut-off download) instead of a generic message.
 - The Xbox screen shows its DNS server. With a manual IP and no DNS server set in the dashboard, xidpipe

@@ -46,6 +46,16 @@ static void test_json(void)
     CHECK(!json_string("{\"tag_name\":\"v0.2.0-way-too-long-for-the-buffer\"}", "tag_name", v, 8));
 }
 
+static void test_status(void)
+{
+    CHECK(http_status("HTTP/1.1 200 OK\r\nServer: x\r\n") == 200);
+    CHECK(http_status("HTTP/2 302 Found\r\n") == 302);
+    CHECK(http_status("HTTP/1.0 404\r\n") == 404);
+    CHECK(http_status("hello 200") == 0);
+    CHECK(http_status("HTTP/1.1 OK") == 0);
+    CHECK(http_status("HTTP/1.1") == 0);
+}
+
 static void test_versions(void)
 {
     CHECK(version_newer("v0.2.0", "0.1.1"));
@@ -54,6 +64,8 @@ static void test_versions(void)
     CHECK(!version_newer("v0.1.1", "0.1.1"));
     CHECK(!version_newer("v0.1.0", "0.1.1"));
     CHECK(!version_newer("nightly", "0.1.1"));
+    CHECK(!version_newer("v1.2", "0.1.1"));    // incomplete
+    CHECK(version_newer("v0.2.10", "0.2.9"));
 }
 
 static void test_dates(void)
@@ -97,6 +109,7 @@ int main(void)
     test_headers();
     test_dechunk();
     test_json();
+    test_status();
     test_versions();
     test_dates();
     test_resolve();

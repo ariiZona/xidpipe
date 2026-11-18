@@ -19,6 +19,9 @@ int http_dechunk(char *b, size_t len, size_t *out_len);
 // Value of the first "key": "string" pair in a JSON document.
 int json_string(const char *json, const char *key, char *out, size_t outlen);
 
+// Status code from an HTTP status line ("HTTP/1.1 200 OK" -> 200), or 0 if it isn't one.
+int http_status(const char *response);
+
 // 1 if version `tag` ("v1.2.3" or "1.2.3") is newer than `mine`.
 int version_newer(const char *tag, const char *mine);
 

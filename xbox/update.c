@@ -305,8 +305,8 @@ static int https_get(const char *url, buf_t *out, size_t max)
 
         char *r = (char *)resp.data;
         char *body = strstr(r, "\r\n\r\n");
-        int status = 0;
-        if (body == NULL || sscanf(r, "HTTP/%*s %d", &status) != 1) {
+        int status = http_status(r);
+        if (body == NULL || status == 0) {
             say("Update check: %s sent an unreadable answer (%lu bytes, TLS error %d)", host, got, tls_err);
             free(resp.data);
             return 0;

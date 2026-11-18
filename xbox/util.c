@@ -85,12 +85,36 @@ int json_string(const char *json, const char *key, char *out, size_t outlen)
     return 1;
 }
 
+// No sscanf here or below: the Xbox's C library (pdclib) doesn't handle all of its formats.
 static int parse_version(const char *s, int v[3])
 {
     if (*s == 'v') {
         s++;
     }
-    return sscanf(s, "%d.%d.%d", &v[0], &v[1], &v[2]) == 3;
+    for (int i = 0; i < 3; i++) {
+        char *end;
+        long n = strtol(s, &end, 10);
+        if (end == s || n < 0 || (i < 2 && *end != '.')) {
+            return 0;
+        }
+        v[i] = (int)n;
+        s = end + 1;
+    }
+    return 1;
+}
+
+int http_status(const char *response)
+{
+    if (strncmp(response, "HTTP/", 5) != 0) {
+        return 0;
+    }
+    const char *sp = strchr(response, ' ');
+    if (sp == NULL) {
+        return 0;
+    }
+    char *end;
+    long code = strtol(sp + 1, &end, 10);
+    return (end != sp + 1 && code >= 100 && code <= 999) ? (int)code : 0;
 }
 
 int version_newer(const char *tag, const char *mine)
