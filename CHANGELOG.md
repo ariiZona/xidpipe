@@ -2,7 +2,10 @@
 
 Each release's notes on GitHub are taken from its section here.
 
-## Unreleased
+## v0.2.1
+
+The Xbox app's update check and FTP server are new and not tested on hardware yet. If you're on
+v0.1.x, install this version by hand once (see the README); after that the Xbox app updates itself.
 
 - The Xbox app checks GitHub for a newer release when it starts, downloads it, and installs it when you
   hold A for 2 seconds (B skips). HTTPS with BearSSL and built-in root certificates; the download must be
