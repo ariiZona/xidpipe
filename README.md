@@ -403,9 +403,10 @@ without rebuilding the Xbox app.
 ## CI and releases
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) builds and tests the PC app on Linux, Windows and macOS
-and builds the Xbox `.xbe`/`.iso` on every push, then uploads the builds as artifacts. Pushing a tag like
-`v0.1.0` (it must match the version in `pc/Cargo.toml`) also publishes a GitHub release with those builds
-attached, and its notes come from that version's section in [CHANGELOG.md](CHANGELOG.md). The release
+and builds the Xbox `.xbe`/`.iso`, then uploads the builds as artifacts. It runs when a version tag like
+`v0.1.0` is pushed (the tag must match the version in `pc/Cargo.toml`), and then also publishes a GitHub
+release with those builds attached, with notes from that version's section in [CHANGELOG.md](CHANGELOG.md).
+To check a branch without releasing, start it by hand with **Run workflow** on the Actions page. The release
 includes `xidpipe-vX.Y.Z-default.xbe` on its own: that's the file installed Xbox apps download to update.
 The workflow also runs on Forgejo/Gitea Actions (minus the release step). There, the Windows and macOS jobs
 need runners with those labels.
