@@ -27,6 +27,9 @@ const HEADER: usize = 14;
 /// The Xbox resends every 50 ms; this much silence means the link is gone.
 const LINK_TIMEOUT: Duration = Duration::from_millis(500);
 const HELLO_EVERY: Duration = Duration::from_secs(1);
+/// After this long without packets from the Xbox, search for it again instead of only
+/// talking to the address it last used.
+const PEER_FRESH: Duration = Duration::from_secs(3);
 /// Rumble is resent this often, so a lost packet can't leave a motor on or off.
 /// The Xbox stops the motors by itself after 1 s without one.
 const RUMBLE_EVERY: Duration = Duration::from_millis(250);
@@ -39,6 +42,8 @@ pub struct Settings {
     pub xbox: Option<IpAddr>,
     /// Controller USB polling rate asked of the Xbox; 0 = auto (controller's own, at least 125 Hz).
     pub poll_hz: u16,
+    /// Where the Xbox was found last time; tried directly while searching.
+    pub hint: Option<IpAddr>,
 }
 
 #[cfg_attr(test, allow(dead_code))] // only the window sends commands
@@ -200,9 +205,6 @@ pub fn run(
         levels: Mutex::new(BTreeMap::new()),
         strength: AtomicU8::new(settings.profile.rumble_strength),
     });
-    let dest = |s: &Settings| {
-        SocketAddr::new(s.xbox.unwrap_or(IpAddr::V4(Ipv4Addr::BROADCAST)), XBOX_PORT)
-    };
     let show = |f: &mut dyn FnMut(&mut Status)| {
         if let Some(s) = &status {
             f(&mut s.lock().unwrap());
@@ -217,17 +219,15 @@ pub fn run(
             s.log.push_back(msg.clone());
         });
     };
-    say(format!(
-        "backend {:?}, looking for the Xbox at {}",
-        settings.profile.backend,
-        dest(&settings)
-    ));
+    say(format!("backend {:?}", settings.profile.backend));
 
     let start = Instant::now();
     let mut last_hello = start - HELLO_EVERY;
     let mut last_rumble = start;
     let mut last_print = start;
     let mut peer: Option<SocketAddr> = None;
+    let mut peer_seen = start;
+    let mut searching_via: Vec<IpAddr> = Vec::new();
     let mut slots: HashMap<u8, Slot> = HashMap::new();
     let mut open_failed: HashMap<u8, Instant> = HashMap::new();
     let mut test_stop: HashMap<u8, Instant> = HashMap::new();
@@ -266,10 +266,19 @@ pub fn run(
         if last_hello.elapsed() >= HELLO_EVERY {
             // Errors here (no route yet, etc.) are retried next second.
             let ping = start.elapsed().as_micros() as u32;
-            let _ = sock.send_to(
-                &hello_packet(poll_ms(settings.poll_hz), ping),
-                dest(&settings),
-            );
+            let hello = hello_packet(poll_ms(settings.poll_hz), ping);
+            let live = peer
+                .filter(|_| peer_seen.elapsed() < PEER_FRESH)
+                .map(|p| p.ip());
+            let targets = hello_targets(settings.xbox, live, settings.hint, &local_ipv4s());
+            if live.is_none() && targets != searching_via {
+                let list: Vec<String> = targets.iter().map(|t| t.to_string()).collect();
+                say(format!("looking for the Xbox via {}", list.join(", ")));
+                searching_via = targets.clone();
+            }
+            for ip in targets {
+                let _ = sock.send_to(&hello, (ip, XBOX_PORT));
+            }
             last_hello = Instant::now();
         }
 
@@ -281,8 +290,10 @@ pub fn run(
                 let Some(msg) = decode(&buf[..n]) else {
                     break 'packet;
                 };
+                peer_seen = Instant::now();
                 if peer != Some(from) {
                     say(format!("Xbox at {from}"));
+                    searching_via.clear();
                     peer = Some(from);
                     *rumble.xbox.lock().unwrap() = Some(from.ip());
                     show(&mut |s| s.xbox = Some(from));
@@ -465,6 +476,47 @@ fn neutral(pad: u8, s: &mut Slot) {
     }
 }
 
+/// Where to send the hello. A manual address wins; a live Xbox gets unicast only. Otherwise
+/// search: the last known address, the limited broadcast, and each local network's own
+/// broadcast address. Windows sends 255.255.255.255 out of only one adapter, often the wrong
+/// one on PCs with VPN, WSL/Hyper-V or VirtualBox adapters; subnet broadcasts always go out
+/// of the adapter they belong to.
+fn hello_targets(
+    manual: Option<IpAddr>,
+    live_peer: Option<IpAddr>,
+    hint: Option<IpAddr>,
+    local: &[(Ipv4Addr, Ipv4Addr)],
+) -> Vec<IpAddr> {
+    if let Some(ip) = manual.or(live_peer) {
+        return vec![ip];
+    }
+    let mut out: Vec<IpAddr> = hint.into_iter().collect();
+    out.push(IpAddr::V4(Ipv4Addr::BROADCAST));
+    for &(ip, mask) in local {
+        // Skip loopback and point-to-point links (VPNs often use /32), which have no broadcast.
+        if ip.is_loopback() || u32::from(mask) >= 0xFFFF_FFFE {
+            continue;
+        }
+        let bcast = IpAddr::V4(Ipv4Addr::from(u32::from(ip) | !u32::from(mask)));
+        if !out.contains(&bcast) {
+            out.push(bcast);
+        }
+    }
+    out
+}
+
+/// This PC's IPv4 addresses with their netmasks (empty if they can't be read).
+fn local_ipv4s() -> Vec<(Ipv4Addr, Ipv4Addr)> {
+    if_addrs::get_if_addrs()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|i| match i.addr {
+            if_addrs::IfAddr::V4(a) => Some((a.ip, a.netmask)),
+            _ => None,
+        })
+        .collect()
+}
+
 /// PC -> Xbox: magic | version | type | poll ms (0 = auto) | 0 | ping u32 (echoed in a pong)
 fn hello_packet(poll_ms: u8, ping: u32) -> [u8; 10] {
     let p = ping.to_le_bytes();
@@ -625,6 +677,36 @@ mod tests {
         assert_eq!(scale_rumble((65535, 1000), 50), (32767, 500));
         assert_eq!(scale_rumble((65535, 1000), 0), (0, 0));
         assert_eq!(scale_rumble((65535, 65535), 200), (65535, 65535)); // clamped to 100%
+    }
+
+    #[test]
+    fn hello_goes_to_every_network() {
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        let v4 = |s: &str| s.parse::<Ipv4Addr>().unwrap();
+        let local = [
+            (v4("192.168.8.2"), v4("255.255.255.0")),
+            (v4("172.30.16.1"), v4("255.255.240.0")),
+            (v4("100.98.199.110"), v4("255.255.255.255")), // VPN /32: skipped
+            (v4("127.0.0.1"), v4("255.0.0.0")),            // loopback: skipped
+            (v4("192.168.8.9"), v4("255.255.255.0")),      // same network twice: once
+        ];
+        assert_eq!(
+            hello_targets(None, None, Some(ip("192.168.8.50")), &local),
+            [
+                ip("192.168.8.50"),
+                ip("255.255.255.255"),
+                ip("192.168.8.255"),
+                ip("172.30.31.255")
+            ]
+        );
+        assert_eq!(
+            hello_targets(None, Some(ip("192.168.8.50")), None, &local),
+            [ip("192.168.8.50")]
+        );
+        assert_eq!(
+            hello_targets(Some(ip("10.0.0.5")), Some(ip("192.168.8.50")), None, &local),
+            [ip("10.0.0.5")]
+        );
     }
 
     #[test]

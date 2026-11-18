@@ -83,7 +83,9 @@ fn run(args: Vec<String>) -> Result<(), String> {
     println!("xidpipe: Ctrl+C to quit");
     // The sender stays alive here so the engine never sees a closed channel.
     let (_keep, commands) = mpsc::channel();
+    let hint = load_app_settings().last_xbox.parse().ok();
     let settings = engine::Settings {
+        hint,
         profile,
         xbox,
         poll_hz,
@@ -97,7 +99,8 @@ pub fn parse_ip(s: &str) -> Result<IpAddr, String> {
         .map_err(|_| format!("bad IP address '{s}'"))
 }
 
-pub fn preset_dir() -> Option<PathBuf> {
+/// xidpipe's folder in the user's config directory.
+fn config_dir() -> Option<PathBuf> {
     let home = || env::var_os("HOME").map(PathBuf::from);
     let base = if cfg!(windows) {
         env::var_os("APPDATA").map(PathBuf::from)
@@ -108,7 +111,43 @@ pub fn preset_dir() -> Option<PathBuf> {
             .map(PathBuf::from)
             .or_else(|| home().map(|h| h.join(".config")))
     };
-    base.map(|b| b.join("xidpipe").join("presets"))
+    base.map(|b| b.join("xidpipe"))
+}
+
+pub fn preset_dir() -> Option<PathBuf> {
+    config_dir().map(|d| d.join("presets"))
+}
+
+/// What the window remembers between runs, in settings.toml next to the presets folder.
+#[derive(serde::Serialize, serde::Deserialize, Default, Clone, PartialEq, Debug)]
+#[serde(default)]
+#[cfg_attr(test, allow(dead_code))]
+pub struct AppSettings {
+    /// Preset to open with ("" = xbox)
+    pub preset: String,
+    /// Xbox address typed by the user ("" = find it automatically)
+    pub xbox: String,
+    pub poll_hz: u16,
+    /// Where the Xbox was found last time, tried first when searching
+    pub last_xbox: String,
+}
+
+/// Missing or unreadable settings just mean defaults; they must never stop xidpipe starting.
+pub fn load_app_settings() -> AppSettings {
+    config_dir()
+        .and_then(|d| fs::read_to_string(d.join("settings.toml")).ok())
+        .and_then(|t| toml::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+#[cfg_attr(test, allow(dead_code))]
+pub fn save_app_settings(s: &AppSettings) -> Result<(), String> {
+    let dir = config_dir().ok_or("can't find a config directory (HOME/APPDATA not set)")?;
+    let text = toml::to_string(s).map_err(|e| e.to_string())?;
+    let file = dir.join("settings.toml");
+    fs::create_dir_all(&dir)
+        .and_then(|_| fs::write(&file, text))
+        .map_err(|e| format!("{}: {e}", file.display()))
 }
 
 fn preset_text(name: &str) -> Result<String, String> {

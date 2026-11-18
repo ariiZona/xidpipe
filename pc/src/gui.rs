@@ -46,9 +46,16 @@ const SNAP_HELP: &str = "Snap correction: some cheap pads zero small stick value
     xidpipe removes the jump. The snapping inside the zone stays: the controller never sends it.";
 
 pub fn run() -> Result<(), String> {
-    let name = "xbox".to_string();
-    let preset = crate::load_preset(&name)?;
+    let saved = crate::load_app_settings();
+    // Reopen the last preset; fall back to the built-in one if it's gone or broken.
+    let (name, preset) = match crate::load_preset(&saved.preset) {
+        Ok(p) if !saved.preset.is_empty() && Profile::new(&p).is_ok() => (saved.preset.clone(), p),
+        _ => ("xbox".to_string(), crate::load_preset("xbox")?),
+    };
     let profile = Profile::new(&preset)?;
+    let xbox = crate::parse_ip(&saved.xbox).ok();
+    let hint = saved.last_xbox.parse().ok();
+    let (xbox_ip, poll_hz) = (saved.xbox.clone(), saved.poll_hz);
     let status = Arc::new(Mutex::new(Status::default()));
     let (tx, rx) = mpsc::channel();
     let st = status.clone();
@@ -58,8 +65,9 @@ pub fn run() -> Result<(), String> {
             let result = engine::run(
                 Settings {
                     profile,
-                    xbox: None,
-                    poll_hz: 0,
+                    xbox,
+                    poll_hz,
+                    hint,
                 },
                 rx,
                 Some(st.clone()),
@@ -72,15 +80,16 @@ pub fn run() -> Result<(), String> {
         .map_err(|e| e.to_string())?;
 
     let app = App {
-        applied: (preset.clone(), String::new(), 0),
-        poll_hz: 0,
+        applied: (preset.clone(), xbox_ip.clone(), poll_hz),
+        poll_hz,
+        saved,
         tab: Tab::Setup,
         test_power: 50,
         test_ms: 700,
         traces: Default::default(),
         name,
         preset,
-        xbox_ip: String::new(),
+        xbox_ip,
         save_as: String::new(),
         note: None,
         invalid: None,
@@ -103,6 +112,8 @@ struct App {
     /// What the engine currently runs, to notice edits.
     applied: (Preset, String, u16),
     poll_hz: u16,
+    /// What's in settings.toml, to write it only when something changed
+    saved: crate::AppSettings,
     tab: Tab,
     /// Debug tab rumble test: power (%) and length (ms)
     test_power: u8,
@@ -123,6 +134,7 @@ impl eframe::App for App {
         // Live view: ~60 fps while open. Input latency doesn't depend on this.
         ui.ctx().request_repaint_after(Duration::from_millis(16));
         self.apply();
+        self.remember();
         egui::Panel::top("tabs").show(ui, |ui| {
             ui.horizontal(|ui| {
                 for (tab, label) in [
@@ -188,13 +200,32 @@ impl App {
             (Ok(profile), Ok(xbox)) => {
                 self.invalid = None;
                 let poll_hz = self.poll_hz;
+                let hint = self.saved.last_xbox.parse().ok();
                 let _ = self.tx.send(Command::Settings(Settings {
                     profile,
                     xbox,
                     poll_hz,
+                    hint,
                 }));
             }
             (Err(e), _) | (_, Err(e)) => self.invalid = Some(e),
+        }
+    }
+
+    /// Save the preset choice, Xbox address, polling and where the Xbox was found, when they change.
+    fn remember(&mut self) {
+        let found = self.status.lock().unwrap().xbox.map(|a| a.ip().to_string());
+        let now = crate::AppSettings {
+            preset: self.name.clone(),
+            xbox: self.xbox_ip.trim().to_string(),
+            poll_hz: self.poll_hz,
+            last_xbox: found.unwrap_or_else(|| self.saved.last_xbox.clone()),
+        };
+        if now != self.saved {
+            if let Err(e) = crate::save_app_settings(&now) {
+                self.note = Some((format!("Couldn't save settings: {e}"), true));
+            }
+            self.saved = now;
         }
     }
 

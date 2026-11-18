@@ -8,6 +8,7 @@ rust-version = "1.88"
 
 [dependencies]
 eframe = "0.37"
+if-addrs = "0.15.0"
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.2.1"
 

@@ -2,6 +2,14 @@
 
 Each release's notes on GitHub are taken from its section here.
 
+## Unreleased
+
+- Finding the Xbox works on PCs with several network adapters (VPN, WSL/Hyper-V, VirtualBox, ZeroTier, …):
+  the hello also goes to each network's own broadcast address and to the address where the Xbox was last
+  found. Before, Windows often sent the broadcast out of the wrong adapter, so the IP had to be typed in.
+- The window remembers the preset, Xbox address, polling rate and last Xbox address between runs
+  (`settings.toml` next to the presets folder).
+
 ## v0.1.0
 
 First release. **xidpipe is vibecoded:** an AI (Claude, through Claude Code) wrote almost all of it.

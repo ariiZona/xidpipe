@@ -38,7 +38,8 @@ XBlast OS and Gentoox) on Windows, playing through xemu. Everything else is only
    through the Windows firewall when asked (private networks).
    **Linux PC:** unpack, give yourself access to `/dev/uinput` (see [Platforms](#platforms)), run `./xidpipe`.
 4. The xidpipe window finds the Xbox by itself. Your controller appears and games see an Xbox 360 controller.
-   If the Xbox isn't found, type the IP from the Xbox screen into **Xbox address** in the window.
+   If the Xbox isn't found (for example it's on another subnet), type the IP from the Xbox screen into
+   **Xbox address** in the window. The window remembers it, and your other settings, for next time.
 
 ## Features
 
@@ -52,7 +53,8 @@ XBlast OS and Gentoox) on Windows, playing through xemu. Everything else is only
 - **Rumble:** the game's rumble goes back to the controller's motors. It's sent the moment the game sets it,
   with an adjustable maximum strength. See [Rumble support](#rumble-support) for which modes have it.
 - **Polling:** "auto" polls each controller at the rate it asks for, but never slower than 125 Hz.
-  You can also pick 125, 250, 500 or 1000 Hz.
+  You can also pick 125, 250, 500 or 1000 Hz. The Xbox starts in auto (so a pad that asks for 4 ms shows
+  "polled every 4 ms" on the Xbox screen) and switches to your choice as soon as the PC connects.
 - **Deadzones:** built-in `xbox` (Xbox defaults) and `zero` (no deadzone) presets, or set your own.
 - **Snap correction:** for cheap pads whose firmware snaps the sticks to the axes (see below).
 - **Button mapping and presets:** remap any button, save and switch presets in the window or as TOML files.
@@ -84,6 +86,10 @@ original pad has no such button.
   1 s without rumble from the PC, so a lost packet or a crashed PC can't leave them running.
 - The window only reads a copy of the live state. The network loop runs on its own thread and never waits for the window.
 - Each side finds the other again on its own: the PC says hello every second, and the Xbox sends to whichever PC spoke last.
+  While searching, the PC sends the hello to the address where it last found the Xbox, to `255.255.255.255`,
+  and to the broadcast address of each of its networks. The last part matters on PCs with VPN, WSL/Hyper-V or
+  VirtualBox adapters, where Windows sends `255.255.255.255` out of only one adapter, often the wrong one.
+  Once the Xbox answers, the PC talks to it directly, and it searches again if the Xbox goes quiet for 3 s.
 - **Polling:** polling faster than a controller asks for is the same trick as USB "overclocking" on PC.
   A controller only produces new data at its own internal rate (the tested Pelican pad: about 125 per second).
   Faster polling can't add updates, but it cuts how long each one waits to be read: up to 8 ms at 125 Hz,
@@ -93,7 +99,9 @@ original pad has no such button.
 
 ## Using it
 
-Start `xidpipe` with no arguments to open the window. Every change applies straight away.
+Start `xidpipe` with no arguments to open the window. Every change applies straight away. The window
+remembers the preset you used, the Xbox address, the polling rate and where it last found the Xbox, in
+`settings.toml` (in the same folder as the saved presets, see [Presets](#presets)).
 
 - **Setup:** presets (menu, Save, Save as), controller type, vibration strength, pressure, deadzones, snap
   correction, button mapping, Xbox address and polling. The right side shows each controller live
