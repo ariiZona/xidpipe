@@ -1,5 +1,5 @@
 # Runs on GitHub Actions and on Forgejo/Gitea Actions (they read .github/workflows too).
-# On Forgejo, the Windows and macOS jobs need runners with those labels.
+# On Forgejo, the Windows job needs a Windows runner.
 name: CI
 
 # Version tags and pull requests run it (plain pushes don't: a commit pushed together with its tag
@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -88,11 +88,8 @@ jobs:
           mkdir out
           cp README.md LICENSE dist/xidpipe-Windows/
           (cd dist/xidpipe-Windows && zip -9 "../../out/xidpipe-$v-windows-x64.zip" xidpipe.exe README.md LICENSE)
-          for os in Linux:linux-x64 macOS:macos-arm64; do
-            src="dist/xidpipe-${os%%:*}"
-            cp README.md LICENSE "$src/" && chmod +x "$src/xidpipe"
-            tar -C "$src" -czf "out/xidpipe-$v-${os##*:}.tar.gz" xidpipe README.md LICENSE
-          done
+          cp README.md LICENSE dist/xidpipe-Linux/ && chmod +x dist/xidpipe-Linux/xidpipe
+          tar -C dist/xidpipe-Linux -czf "out/xidpipe-$v-linux-x64.tar.gz" xidpipe README.md LICENSE
           (cd dist/xidpipe-xbox && zip -9 -j "../../out/xidpipe-$v-xbox.zip" bin/default.xbe xidpipe.iso)
           # The Xbox app's update check downloads this file by this exact name.
           cp dist/xidpipe-xbox/bin/default.xbe "out/xidpipe-$v-default.xbe"

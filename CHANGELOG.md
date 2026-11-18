@@ -2,6 +2,11 @@
 
 Each release's notes on GitHub are taken from its section here.
 
+## Unreleased
+
+- macOS is no longer supported or built: it can't create virtual controllers, so the PC app could only
+  show the controller there. Building the Xbox app on a Mac still works.
+
 ## v0.2.1
 
 The Xbox app's update check and FTP server are new and not tested on hardware yet. If you're on

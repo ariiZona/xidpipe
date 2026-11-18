@@ -47,8 +47,9 @@ cargo test --locked
 cargo build --release --locked
 ```
 
-CI runs exactly these on Linux, Windows and macOS, with warnings as errors. To check another OS locally
-without running it: `rustup target add x86_64-unknown-linux-gnu x86_64-apple-darwin`, then
+CI runs exactly these on Linux and Windows, with warnings as errors (macOS isn't supported: it has no public
+API for virtual controllers). To check the other OS locally without running it:
+`rustup target add x86_64-unknown-linux-gnu` (or `x86_64-pc-windows-msvc`), then
 `cargo clippy --locked --all-targets --target <triple> -- -D warnings`.
 
 Xbox app (from `xbox/`, after `git submodule update --init --recursive`):

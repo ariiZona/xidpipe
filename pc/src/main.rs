@@ -104,8 +104,6 @@ fn config_dir() -> Option<PathBuf> {
     let home = || env::var_os("HOME").map(PathBuf::from);
     let base = if cfg!(windows) {
         env::var_os("APPDATA").map(PathBuf::from)
-    } else if cfg!(target_os = "macos") {
-        home().map(|h| h.join("Library/Application Support"))
     } else {
         env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)

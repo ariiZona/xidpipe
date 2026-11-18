@@ -25,7 +25,7 @@ check (new in v0.2) haven't been tested on hardware yet. Everything else is only
 - An original Xbox that can run homebrew (softmodded or modchipped), with a dashboard that can launch
   `.xbe` files and has an FTP server (UnleashX, XBMC4Xbox, EvoX, …).
 - The Xbox and the PC on the same network. **Wired Ethernet is best**; Wi-Fi works but adds delay spikes.
-- A PC running Windows or Linux. macOS works only as a viewer (see [Platforms](#platforms)).
+- A PC running Windows or Linux. (macOS isn't supported, see [Platforms](#platforms).)
 
 ## Quick start (no building)
 
@@ -208,8 +208,9 @@ zone can't be undone, because the controller never sends those values.
   `xinput` uses the Xbox 360 controller's USB IDs and the kernel xpad driver's button codes, so SDL, Steam and
   Wine/Proton should treat it as an Xbox 360 controller (not tested on Linux yet). `dinput` is a generic gamepad.
   The window needs a normal desktop session (X11 or Wayland with OpenGL).
-- **macOS:** runs with `backend = "none"` only (view and test, no virtual controller). macOS has no public
-  API for virtual game controllers without an Apple-granted driver entitlement.
+- **macOS:** not supported. macOS has no public API for virtual game controllers without an Apple-granted
+  driver entitlement, so the PC app could only ever show the controller, not pass it to games. You can still
+  build the Xbox app on a Mac (see below).
 - **Xbox network:** the Xbox app uses the network settings saved on the Xbox (a manual IP set in your
   dashboard) if there are any, and DHCP otherwise.
 
@@ -311,13 +312,6 @@ toolchain, switch this project to MSVC: run `rustup override set stable-x86_64-p
 Install a full MinGW-w64, e.g. `scoop install mingw` or MSYS2's `mingw-w64-x86_64-toolchain`, and put its
 `bin` folder on `PATH`.)
 
-**macOS** (Intel or Apple Silicon):
-
-| package manager | install commands |
-|---|---|
-| Homebrew | `xcode-select --install`, then `brew install rust` |
-| MacPorts | `xcode-select --install`, then `sudo port install rust` |
-
 **Build:**
 
 ```sh
@@ -330,8 +324,8 @@ The first build downloads and compiles the Rust dependencies, which takes a few 
 
 ## Presets
 
-Saved presets live in `%APPDATA%\xidpipe\presets` (Windows), `~/.config/xidpipe/presets` (Linux) or
-`~/Library/Application Support/xidpipe/presets` (macOS). The window's Save / Save as write them there, and so
+Saved presets live in `%APPDATA%\xidpipe\presets` (Windows) or `~/.config/xidpipe/presets` (Linux).
+The window's Save / Save as write them there, and so
 does `xidpipe save`. The built-in `xbox` and `zero` can't be overwritten.
 [`pc/presets/xbox.toml`](pc/presets/xbox.toml) documents every setting:
 
@@ -402,21 +396,20 @@ without rebuilding the Xbox app.
 
 ## CI and releases
 
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) builds and tests the PC app on Linux, Windows and macOS
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) builds and tests the PC app on Linux and Windows
 and builds the Xbox `.xbe`/`.iso`, then uploads the builds as artifacts. It runs when a version tag like
 `v0.1.0` is pushed (the tag must match the version in `pc/Cargo.toml`), and then also publishes a GitHub
 release with those builds attached, with notes from that version's section in [CHANGELOG.md](CHANGELOG.md).
 Pull requests are checked too (without releasing). To check a branch by hand, use **Run workflow** on the Actions page. The release
 includes `xidpipe-vX.Y.Z-default.xbe` on its own: that's the file installed Xbox apps download to update.
-The workflow also runs on Forgejo/Gitea Actions (minus the release step). There, the Windows and macOS jobs
-need runners with those labels.
+The workflow also runs on Forgejo/Gitea Actions (minus the release step). There, the Windows job
+needs a Windows runner.
 
 ## Not done yet
 
 - USB/IP (making the controller show up on the PC as a real USB OG controller). The point would be xemu, but xemu
   doesn't support USB passthrough yet ("USB passthru is not supported yet, but it will be coming"). Worth
   revisiting once it does.
-- Virtual controllers on macOS
 - Rumble for `dinput` on Windows and for `vjoy`
 
 ## License
