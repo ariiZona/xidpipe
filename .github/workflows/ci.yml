@@ -2,11 +2,12 @@
 # On Forgejo, the Windows and macOS jobs need runners with those labels.
 name: CI
 
-# Only version tags run it (a commit pushed together with its tag would otherwise run twice).
-# "Run workflow" on the Actions page starts it by hand for any branch.
+# Version tags and pull requests run it (plain pushes don't: a commit pushed together with its tag
+# would otherwise run twice). "Run workflow" on the Actions page starts it by hand for any branch.
 on:
   push:
     tags: ['v*']
+  pull_request:
   workflow_dispatch:
 
 jobs:
