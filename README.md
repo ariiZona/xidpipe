@@ -14,10 +14,14 @@ OG controller --USB--> Xbox (xbox/, nxdk homebrew) --UDP, LAN--> PC (pc/, Rust) 
 - **Controller API is your choice:** `xinput` (Xbox 360 pad), `dinput` (DualShock 4 on Windows,
   generic pad on Linux) or `vjoy` (Windows DirectInput via vJoy, with two extra axes for pressure buttons).
 - **Pressure-sensitive face buttons:** A B X Y Black White can drive analog outputs (e.g. A as an analog accelerator on RT).
-- **Rumble:** games' rumble goes back to the controller's motors.
+- **Rumble:** games' rumble goes back to the controller's motors within a few milliseconds.
+- **Fast polling:** the Xbox polls controllers at 125 Hz or faster (up to 1000 Hz), whatever the controller asks for.
 - **Deadzones:** built-in `xbox` (Xbox defaults) and `zero` (no deadzone) presets, or set your own.
 - **Presets:** save, edit and switch presets in the window or as TOML files.
 - **Window:** pick and edit presets live, and watch each controller's raw input, its output and the deadzone.
+- **Button tester:** a drawn controller that lights up with every button, stick and pressure value.
+- **Debug view:** polling rate, USB report rate, packet rate and gaps, lost packets, network round trip,
+  raw reports, rumble test buttons and a log.
 - Up to 4 controllers (one per Xbox port, kept in port order).
 
 ## Latency and reliability
@@ -28,12 +32,19 @@ OG controller --USB--> Xbox (xbox/, nxdk homebrew) --UDP, LAN--> PC (pc/, Rust) 
 - Every packet carries the full controller state. The Xbox also resends it every 50 ms, so a lost packet is fixed by the next one.
   The PC drops stale or reordered packets by sequence number.
 - If the Xbox or the network goes quiet for 500 ms, the PC releases every input, so nothing stays stuck held down.
+- Rumble never waits on a timer. The backend's own thread (ViGEm's notification, or Linux force feedback via
+  `poll()`) sends it the moment the game asks. An lwIP callback on the Xbox wakes the main loop, and the motor
+  write goes out on the next 1 ms USB frame.
 - Rumble is resent every 250 ms. The Xbox stops the motors by itself after 1 s without word from the PC, so a lost
   packet or a crashed PC can't leave them running.
 - The window only reads a copy of the live state. The network loop runs on its own thread and never waits for the window.
 - Each side finds the other again on its own: the PC says hello every second, and the Xbox follows whichever PC spoke last.
-- The controller's own USB poll rate (usually 4-8 ms) is the biggest delay. Use **wired Ethernet** for the Xbox and,
-  ideally, for the PC too. Wi-Fi adds jitter.
+- **Polling:** by default ("auto") the Xbox polls each controller at the rate it asks for, but never slower than
+  125 Hz (8 ms). You can raise it to 250, 500 or 1000 Hz in the window (Setup > Controller polling) or with
+  `--poll HZ`. Polling faster than a controller asks for is the same trick as USB "overclocking" on PC. Nearly every
+  pad handles it, and the Debug tab shows the rate actually reached. If a pad misbehaves, go back to auto.
+- Use **wired Ethernet** for the Xbox and, ideally, for the PC too. Wi-Fi adds jitter: the Debug tab's
+  "longest gap" and round-trip numbers show it.
 
 ## Setup
 
@@ -80,9 +91,13 @@ cargo build --release      # -> pc/target/release/xidpipe(.exe)
 
 ### 3. Play
 
-Start `xidpipe` with no arguments to open the window. Every change applies straight away. The preset menu,
-Save and Save as manage presets, and the right side shows each controller live (grey dot: raw stick,
-coloured dot: what the PC gets, shaded disc: deadzone).
+Start `xidpipe` with no arguments to open the window. Every change applies straight away.
+
+- **Setup:** presets (menu, Save, Save as), controller type, pressure, deadzones, mapping, Xbox address and
+  polling. The right side shows each controller live (grey dot: raw stick, coloured dot: what the PC gets,
+  shaded disc: deadzone).
+- **Button tester:** the raw controller as the Xbox reads it.
+- **Debug:** connection and per-pad statistics, rumble test buttons and the log.
 
 Or run it without a window:
 
@@ -90,6 +105,7 @@ Or run it without a window:
 xidpipe xbox            # preset "xbox"; finds the Xbox by broadcast
 xidpipe zero            # zero deadzone
 xidpipe xbox --xbox 192.168.1.50   # if broadcast doesn't reach the Xbox (different subnet, several network cards)
+xidpipe xbox --poll 1000  # poll the controllers at 1000 Hz
 xidpipe xbox --monitor  # also print raw input and mapped output, for tuning deadzones
 ```
 
@@ -131,9 +147,15 @@ a = "none"
 
 UDP, port 47100 on the Xbox, little-endian. Every packet starts with `"XP"`, version `1` and a type byte.
 
-- PC -> Xbox hello (type `0x10`), 4 bytes, sent every second. The Xbox sends to the last PC that said hello and stops after 3 s of silence.
+- PC -> Xbox hello (type `0x10`), 10 bytes, sent every second: header, polling interval in ms (0 = auto,
+  else 1/2/4/8), 0, ping u32. The Xbox sends to the last PC that said hello and stops after 3 s of silence.
+  It answers each hello right away with a pong (type `3`, 10 bytes, the ping echoed at offset 6), so the PC can
+  measure the round trip.
 - PC -> Xbox rumble (type `0x11`), 9 bytes: header, pad id, left (heavy) motor u16, right (light) motor u16.
   Sent on change and every 250 ms. The Xbox only accepts it from the PC it streams to.
+- Xbox -> PC info (type `4`), 14 bytes, once a second per pad: header, pad id, the controller's own interval (ms),
+  the interval used (ms), XID type, XID subtype (0/0 = no XID descriptor), has rumble, USB reports/s u16,
+  USB errors u16.
 - Xbox -> PC state (type `1`) or unplugged (type `2`):
 
 | offset | size | field |
@@ -168,6 +190,9 @@ Actions. On Forgejo, the Windows and macOS jobs need runners with those labels.
 
 ## Not done yet
 
+- USB/IP (making the controller show up on the PC as a real USB OG controller). The point would be xemu, but xemu
+  doesn't support USB passthrough yet ("USB passthru is not supported yet, but it will be coming"). Worth
+  revisiting once it does.
 - Virtual controllers on macOS
 - Rumble for `dinput` on Windows and for `vjoy`
 

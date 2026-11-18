@@ -2,7 +2,8 @@
 // xidpipe, Xbox side: forwards raw XID controller reports to the PC app over UDP.
 //
 // Latency path: USB interrupt -> DPC copies the report and signals `wake` -> main thread
-// sends it straight away. Nothing is batched or polled on a timer.
+// sends it straight away. Packets from the PC (hello, rumble) arrive in an lwIP callback
+// that also signals `wake`, so rumble reaches the USB bus without waiting for a timer.
 // Reliability: every packet carries the full controller state, and the state is resent
 // every RESEND_MS even when nothing changed, so a lost packet is fixed by the next one.
 // Rumble comes back from the PC the same way (full state, resent), and stops by itself if
@@ -14,7 +15,9 @@
 #include <xboxkrnl/xboxkrnl.h>
 #include <nxdk/net.h>
 #include <lwip/netif.h>
-#include <lwip/sockets.h>
+#include <lwip/pbuf.h>
+#include <lwip/tcpip.h>
+#include <lwip/udp.h>
 #include <usbh_lib.h>
 #include <usb.h>
 #include <hub.h>
@@ -24,15 +27,19 @@
 #define XP_VERSION 1
 #define MSG_STATE 1
 #define MSG_UNPLUGGED 2
+#define MSG_PONG 3
+#define MSG_INFO 4
 #define MSG_HELLO 0x10
 #define MSG_RUMBLE 0x11
 #define HEADER 14
 #define REPORT_MAX 32
 #define MAX_PADS 8
 #define RESEND_MS 50
+#define INFO_MS 1000
 #define PEER_TIMEOUT_MS 3000
 #define RETRY_MS 500
 #define RUMBLE_TIMEOUT_MS 1000 // the PC resends every 250 ms
+#define AUTO_MAX_INTERVAL_MS 8 // "auto" polling never goes below 125 Hz
 #define XID_CLASS 0x58
 
 typedef struct {
@@ -40,17 +47,19 @@ typedef struct {
     UTR_T *utr;
     uint8_t id;               // 1-4: front port number, 5+: port unknown
     uint16_t vid, pid;
+    uint8_t xid_type, xid_sub; // 0: the pad has no XID descriptor (some 3rd-party pads)
+    uint8_t dev_interval;     // bInterval the controller asks for, in ms
+    uint8_t interval;         // interval we poll it at, in ms
     volatile uint32_t gen;    // bumped by the DPC for every report
-    volatile uint8_t failed;  // the DPC stopped reading after a USB error
+    volatile uint8_t failed;  // reading stopped (USB error or interval change); main loop re-arms
     volatile uint8_t len;
+    volatile uint16_t errors;
     uint8_t report[REPORT_MAX];
-    uint32_t sent_gen;
-    DWORD sent_at, failed_at;
+    uint32_t sent_gen, info_gen;
+    DWORD sent_at, failed_at, info_at;
     UTR_T *out_utr;           // rumble writes; NULL if the pad has no OUT endpoint
     volatile uint8_t out_busy;
-    uint16_t rumble[2];       // wanted: left (heavy) motor, right (light) motor
     uint16_t rumble_sent[2];
-    DWORD rumble_seen;
 } pad_t;
 
 extern struct netif *g_pnetif;
@@ -58,10 +67,79 @@ extern struct netif *g_pnetif;
 static pad_t pads[MAX_PADS];
 static uint32_t seqs[16]; // per pad id; never reset, so the PC can drop stale packets
 static KEVENT wake;
-static int sock = -1;
-static struct sockaddr_in peer;
-static int have_peer;
+static uint8_t poll_ms;   // applied polling setting from the PC: 0 = auto, else 1/2/4/8 ms
+
+// Shared with the lwIP callback; only touched while holding the lwIP core lock.
+static struct udp_pcb *pcb;
+static ip_addr_t peer_ip;
+static u16_t peer_port;
+static int have_peer, peer_changed;
 static DWORD peer_seen;
+static uint8_t want_poll_ms;
+static uint16_t want_rumble[16][2]; // by pad id
+static DWORD rumble_seen[16];
+
+// Caller holds the lwIP core lock.
+static void send_raw(const ip_addr_t *to, u16_t port, const void *data, u16_t len)
+{
+    struct pbuf *q = pbuf_alloc(PBUF_TRANSPORT, len, PBUF_RAM);
+    if (q == NULL) {
+        return;
+    }
+    memcpy(q->payload, data, len);
+    udp_sendto(pcb, q, to, port);
+    pbuf_free(q);
+}
+
+static void send_peer(const void *data, u16_t len)
+{
+    LOCK_TCPIP_CORE();
+    if (have_peer) {
+        send_raw(&peer_ip, peer_port, data, len);
+    }
+    UNLOCK_TCPIP_CORE();
+}
+
+// lwIP callback (tcpip thread, core lock held): hello and rumble from the PC.
+static void on_udp(void *arg, struct udp_pcb *upcb, struct pbuf *p, const ip_addr_t *addr, u16_t port)
+{
+    (void)arg;
+    (void)upcb;
+    uint8_t b[16];
+    u16_t n = pbuf_copy_partial(p, b, sizeof(b), 0);
+    pbuf_free(p);
+    if (n < 4 || b[0] != 'X' || b[1] != 'P' || b[2] != XP_VERSION) {
+        return;
+    }
+    DWORD now = GetTickCount();
+
+    if (b[3] == MSG_HELLO) {
+        if (!have_peer || !ip_addr_eq(&peer_ip, addr) || peer_port != port) {
+            peer_changed = 1;
+        }
+        ip_addr_copy(peer_ip, *addr);
+        peer_port = port;
+        have_peer = 1;
+        peer_seen = now;
+        if (n >= 5) {
+            want_poll_ms = b[4];
+        }
+        if (n >= 10) {
+            // Echo the PC's timestamp right away so it can measure the round trip.
+            uint8_t pong[10] = {'X', 'P', XP_VERSION, MSG_PONG, 0, 0, b[6], b[7], b[8], b[9]};
+            send_raw(addr, port, pong, sizeof(pong));
+        }
+    } else if (b[3] == MSG_RUMBLE && n >= 9 && have_peer && ip_addr_eq(&peer_ip, addr) && peer_port == port) {
+        // Only the PC we stream to may drive the motors.
+        uint8_t id = b[4] & 15;
+        want_rumble[id][0] = b[5] | b[6] << 8;
+        want_rumble[id][1] = b[7] | b[8] << 8;
+        rumble_seen[id] = now;
+    } else {
+        return;
+    }
+    KeSetEvent(&wake, 1, FALSE);
+}
 
 static void send_pad(pad_t *p, uint8_t type)
 {
@@ -77,9 +155,6 @@ static void send_pad(pad_t *p, uint8_t type)
         KfLowerIrql(irql);
     }
     p->sent_at = GetTickCount();
-    if (!have_peer) {
-        return;
-    }
 
     uint32_t seq = ++seqs[p->id & 15];
     b[0] = 'X';
@@ -96,7 +171,20 @@ static void send_pad(pad_t *p, uint8_t type)
     b[11] = seq >> 8;
     b[12] = seq >> 16;
     b[13] = seq >> 24;
-    lwip_sendto(sock, b, HEADER + len, 0, (struct sockaddr *)&peer, sizeof(peer));
+    send_peer(b, HEADER + len);
+}
+
+// Once a second: what the PC's debug view shows about this pad.
+static void send_info(pad_t *p, DWORD now)
+{
+    uint32_t elapsed = now - p->info_at;
+    uint32_t rate = elapsed ? (p->gen - p->info_gen) * 1000 / elapsed : 0;
+    uint16_t errors = p->errors;
+    uint8_t b[14] = {'X', 'P', XP_VERSION, MSG_INFO, p->id, p->dev_interval, p->interval, p->xid_type,
+                     p->xid_sub, p->out_utr != NULL, rate, rate >> 8, errors, errors >> 8};
+    p->info_gen = p->gen;
+    p->info_at = now;
+    send_peer(b, sizeof(b));
 }
 
 // Runs in the USB DPC. Copy the report, re-arm the read, wake the main thread.
@@ -104,11 +192,12 @@ static void on_report(UTR_T *utr)
 {
     pad_t *p = (pad_t *)utr->context;
 
-    if (p->iface == NULL) {
-        return;
+    if (p->iface == NULL || p->failed) {
+        return; // unplugged, or the main loop is re-arming this pad
     }
     if (utr->status < 0) {
         p->failed = 1;
+        p->errors++;
         KeSetEvent(&wake, 1, FALSE);
         return;
     }
@@ -127,6 +216,7 @@ static void on_report(UTR_T *utr)
     utr->bIsTransferDone = 0;
     if (usbh_int_xfer(utr) != USBH_OK) {
         p->failed = 1;
+        p->errors++;
     }
     KeSetEvent(&wake, 1, FALSE);
 }
@@ -138,33 +228,51 @@ static void on_rumble_done(UTR_T *utr)
     KeSetEvent(&wake, 1, FALSE);
 }
 
-static void update_rumble(pad_t *p, DWORD now)
+static void update_rumble(pad_t *p, const uint16_t want[2])
 {
-    if (!have_peer || now - p->rumble_seen > RUMBLE_TIMEOUT_MS) {
-        p->rumble[0] = p->rumble[1] = 0;
-    }
-    if (p->out_utr == NULL || p->out_busy ||
-        (p->rumble[0] == p->rumble_sent[0] && p->rumble[1] == p->rumble_sent[1])) {
+    if (p->out_utr == NULL || p->out_busy || (want[0] == p->rumble_sent[0] && want[1] == p->rumble_sent[1])) {
         return;
     }
     // XID rumble report: id 0, length 6, left u16, right u16
     uint8_t *b = p->out_utr->buff;
     b[0] = 0;
     b[1] = 6;
-    b[2] = p->rumble[0];
-    b[3] = p->rumble[0] >> 8;
-    b[4] = p->rumble[1];
-    b[5] = p->rumble[1] >> 8;
+    b[2] = want[0];
+    b[3] = want[0] >> 8;
+    b[4] = want[1];
+    b[5] = want[1] >> 8;
     p->out_utr->data_len = 6;
     p->out_utr->xfer_len = 0;
     p->out_utr->bIsTransferDone = 0;
     // Marked sent even if queueing fails, so a pad that rejects rumble isn't retried every loop.
-    p->rumble_sent[0] = p->rumble[0];
-    p->rumble_sent[1] = p->rumble[1];
+    p->rumble_sent[0] = want[0];
+    p->rumble_sent[1] = want[1];
     p->out_busy = 1;
     if (usbh_int_xfer(p->out_utr) != USBH_OK) {
         p->out_busy = 0;
     }
+}
+
+// Polling interval for a pad: the PC's choice, or the controller's own but at least 125 Hz.
+static uint8_t interval_for(const pad_t *p)
+{
+    if (poll_ms) {
+        return poll_ms;
+    }
+    return p->dev_interval && p->dev_interval < AUTO_MAX_INTERVAL_MS ? p->dev_interval : AUTO_MAX_INTERVAL_MS;
+}
+
+// Change a live pad's polling interval. OHCI fixes the interval when the endpoint is first
+// queued, so stop the endpoint and let retry_read re-arm it (that also resets the data toggle).
+static void set_interval(pad_t *p, uint8_t ms, DWORD now)
+{
+    KIRQL irql = KeRaiseIrqlToDpcLevel();
+    p->failed = 1; // stops on_report from re-queueing
+    KfLowerIrql(irql);
+    p->iface->udev->hc_driver->quit_xfer(NULL, p->utr->ep);
+    p->utr->ep->bInterval = ms;
+    p->interval = ms;
+    p->failed_at = now ? now : 1;
 }
 
 // Front panel port (1-4) of a device, 0 if unknown. Same mapping as nxdk's SDL driver.
@@ -193,12 +301,13 @@ static int xp_probe(IFACE_T *iface)
 
     // Official pads answer the XID descriptor request; some 3rd-party pads don't, and nxdk's
     // own xid driver rejects those. Here a missing descriptor just means "assume a gamepad".
-    int type = 0x01;
+    uint8_t type = 0, sub = 0;
     uint8_t *desc = usbh_alloc_mem(16);
     if (desc != NULL) {
         uint32_t got = 0;
-        if (usbh_ctrl_xfer(udev, 0xC1, 0x06, 0x4200, iface->if_num, 16, desc, &got, 100) == USBH_OK && got >= 5) {
+        if (usbh_ctrl_xfer(udev, 0xC1, 0x06, 0x4200, iface->if_num, 16, desc, &got, 100) == USBH_OK && got >= 6) {
             type = desc[4];
+            sub = desc[5];
         }
         usbh_free_mem(desc, 16);
     }
@@ -237,6 +346,12 @@ static int xp_probe(IFACE_T *iface)
     p->id = port ? port : 5 + (p - pads);
     p->vid = udev->descriptor.idVendor;
     p->pid = udev->descriptor.idProduct;
+    p->xid_type = type;
+    p->xid_sub = sub;
+    p->dev_interval = ep->bInterval;
+    p->interval = interval_for(p);
+    ep->bInterval = p->interval; // read by OHCI when the endpoint is first queued below
+    p->info_at = GetTickCount();
     p->utr = utr;
     utr->context = p;
     utr->ep = ep;
@@ -265,10 +380,12 @@ static int xp_probe(IFACE_T *iface)
             out->context = p;
             out->ep = out_ep;
             out->func = on_rumble_done;
+            out_ep->bInterval = 1; // rumble goes out on the next 1 ms frame
         }
     }
     p->out_utr = out;
-    debugPrint("Pad %u connected (%04x:%04x, XID type %02x)\n", p->id, p->vid, p->pid, type);
+    debugPrint("Pad %u connected (%04x:%04x, XID %02x/%02x, polled every %u ms)\n", p->id, p->vid, p->pid, type, sub,
+               p->interval);
     return USBH_OK;
 }
 
@@ -301,7 +418,7 @@ static void xp_disconnect(IFACE_T *iface)
     debugPrint("Pad %u disconnected\n", p->id);
 }
 
-// Re-arm a read that stopped after a USB error (3rd-party pads can glitch).
+// Re-arm a read that stopped (USB error, 3rd-party glitch, or an interval change).
 static void retry_read(pad_t *p, DWORD now)
 {
     if (p->failed_at == 0) {
@@ -312,47 +429,14 @@ static void retry_read(pad_t *p, DWORD now)
         return;
     }
     usbh_clear_halt(p->iface->udev, p->utr->ep->bEndpointAddress);
-    p->failed = 0;
     p->failed_at = 0;
     p->utr->xfer_len = 0;
     p->utr->bIsTransferDone = 0;
+    KIRQL irql = KeRaiseIrqlToDpcLevel();
+    p->failed = 0;
+    KfLowerIrql(irql);
     if (usbh_int_xfer(p->utr) != USBH_OK) {
         p->failed = 1;
-    }
-}
-
-static void poll_net(DWORD now)
-{
-    uint8_t b[16];
-    struct sockaddr_in from;
-    socklen_t from_len = sizeof(from);
-
-    int n;
-    while ((n = lwip_recvfrom(sock, b, sizeof(b), MSG_DONTWAIT, (struct sockaddr *)&from, &from_len)) >= 4) {
-        if (b[0] == 'X' && b[1] == 'P' && b[2] == XP_VERSION && b[3] == MSG_HELLO) {
-            if (!have_peer || from.sin_addr.s_addr != peer.sin_addr.s_addr || from.sin_port != peer.sin_port) {
-                debugPrint("PC connected: %s\n", ip4addr_ntoa((const ip4_addr_t *)&from.sin_addr));
-            }
-            peer = from;
-            have_peer = 1;
-            peer_seen = now;
-        } else if (n >= 9 && b[0] == 'X' && b[1] == 'P' && b[2] == XP_VERSION && b[3] == MSG_RUMBLE &&
-                   have_peer && from.sin_addr.s_addr == peer.sin_addr.s_addr && from.sin_port == peer.sin_port) {
-            // Only the PC we stream to may drive the motors.
-            for (int i = 0; i < MAX_PADS; i++) {
-                if (pads[i].iface != NULL && pads[i].id == b[4]) {
-                    pads[i].rumble[0] = b[5] | b[6] << 8;
-                    pads[i].rumble[1] = b[7] | b[8] << 8;
-                    pads[i].rumble_seen = now;
-                }
-            }
-        }
-        from_len = sizeof(from);
-    }
-
-    if (have_peer && now - peer_seen > PEER_TIMEOUT_MS) {
-        have_peer = 0;
-        debugPrint("PC gone, waiting for it again\n");
     }
 }
 
@@ -370,34 +454,71 @@ int main(void)
         }
     }
 
-    sock = lwip_socket(AF_INET, SOCK_DGRAM, 0);
-    struct sockaddr_in me;
-    memset(&me, 0, sizeof(me));
-    me.sin_family = AF_INET;
-    me.sin_port = lwip_htons(XP_PORT);
-    me.sin_addr.s_addr = INADDR_ANY;
-    if (sock < 0 || lwip_bind(sock, (struct sockaddr *)&me, sizeof(me)) != 0) {
+    KeInitializeEvent(&wake, SynchronizationEvent, FALSE);
+
+    LOCK_TCPIP_CORE();
+    pcb = udp_new();
+    err_t bound = pcb ? udp_bind(pcb, IP_ANY_TYPE, XP_PORT) : ERR_MEM;
+    if (bound == ERR_OK) {
+        udp_recv(pcb, on_udp, NULL);
+    }
+    UNLOCK_TCPIP_CORE();
+    if (bound != ERR_OK) {
         debugPrint("Could not open UDP port %d.\n", XP_PORT);
         for (;;) {
             Sleep(1000);
         }
     }
     debugPrint("Xbox IP: %s  (UDP %d)\n", ip4addr_ntoa(netif_ip4_addr(g_pnetif)), XP_PORT);
-    debugPrint("Run xidpipe on the PC. If it can't find the Xbox: xidpipe --xbox <this IP>\n\n");
+    debugPrint("Run xidpipe on the PC. If it can't find the Xbox, enter this IP in xidpipe.\n\n");
 
-    KeInitializeEvent(&wake, SynchronizationEvent, FALSE);
     usbh_core_init();
     usbh_register_driver(&xp_driver);
 
     for (;;) {
-        // Woken at once by a new report; the timeout paces hotplug, hellos and resends.
+        // Woken at once by a USB report or a PC packet; the timeout paces hotplug and resends.
         LARGE_INTEGER timeout;
         timeout.QuadPart = -4 * 10000LL; // 4 ms
         KeWaitForSingleObject(&wake, Executive, KernelMode, FALSE, &timeout);
 
         usbh_pooling_hubs();
+
+        // Snapshot what the network callback shared. `now` is read under the lock so it is
+        // never older than a timestamp the callback wrote.
+        uint16_t rumble[16][2];
+        LOCK_TCPIP_CORE();
         DWORD now = GetTickCount();
-        poll_net(now);
+        int gone = have_peer && now - peer_seen > PEER_TIMEOUT_MS;
+        if (gone) {
+            have_peer = 0;
+        }
+        int connected = peer_changed ? 1 : 0;
+        peer_changed = 0;
+        uint8_t want_poll = want_poll_ms;
+        for (int id = 0; id < 16; id++) {
+            int live = have_peer && now - rumble_seen[id] <= RUMBLE_TIMEOUT_MS;
+            rumble[id][0] = live ? want_rumble[id][0] : 0;
+            rumble[id][1] = live ? want_rumble[id][1] : 0;
+        }
+        char peer_text[IPADDR_STRLEN_MAX];
+        ipaddr_ntoa_r(&peer_ip, peer_text, sizeof(peer_text));
+        UNLOCK_TCPIP_CORE();
+
+        if (connected) {
+            debugPrint("PC connected: %s\n", peer_text);
+        }
+        if (gone) {
+            debugPrint("PC gone, waiting for it again\n");
+        }
+        if (want_poll != poll_ms && (want_poll == 0 || want_poll == 1 || want_poll == 2 || want_poll == 4 || want_poll == 8)) {
+            poll_ms = want_poll;
+            debugPrint("Polling: %s%u ms\n", poll_ms ? "every " : "auto, at most ", poll_ms ? poll_ms : AUTO_MAX_INTERVAL_MS);
+            for (int i = 0; i < MAX_PADS; i++) {
+                if (pads[i].iface != NULL && interval_for(&pads[i]) != pads[i].interval) {
+                    set_interval(&pads[i], interval_for(&pads[i]), now);
+                }
+            }
+        }
 
         for (int i = 0; i < MAX_PADS; i++) {
             pad_t *p = &pads[i];
@@ -410,7 +531,10 @@ int main(void)
             if (p->len && (p->gen != p->sent_gen || now - p->sent_at >= RESEND_MS)) {
                 send_pad(p, MSG_STATE);
             }
-            update_rumble(p, now);
+            if (now - p->info_at >= INFO_MS) {
+                send_info(p, now);
+            }
+            update_rumble(p, rumble[p->id & 15]);
         }
     }
 }

@@ -23,12 +23,14 @@ pub const BUILTIN: [(&str, &str); 2] = [
 const USAGE: &str = "\
 usage:
   xidpipe                                     open the window (presets, live view)
-  xidpipe PRESET [--xbox IP] [--monitor]      run without a window
+  xidpipe PRESET [--xbox IP] [--poll HZ] [--monitor]   run without a window
   xidpipe save NAME [FROM]                    copy preset FROM (default: xbox) to NAME for editing
   xidpipe list                                list presets
 
 PRESET is a built-in name (xbox, zero), a saved preset name, or a path to a .toml file.
 --xbox IP   talk to this Xbox directly instead of finding it by broadcast
+--poll HZ   poll the controllers at 125, 250, 500 or 1000 Hz (default: auto, the
+            controller's own rate but at least 125 Hz)
 --monitor   print controller input and output, for checking deadzones and mapping";
 
 fn main() -> ExitCode {
@@ -54,6 +56,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
     let mut preset = "xbox".to_string();
     let mut xbox = None;
     let mut monitor = false;
+    let mut poll_hz = 0;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -61,6 +64,10 @@ fn run(args: Vec<String>) -> Result<(), String> {
             "list" => return list(),
             "--xbox" => xbox = Some(parse_ip(it.next().ok_or(USAGE)?)?),
             "--monitor" => monitor = true,
+            "--poll" => {
+                let hz = it.next().ok_or(USAGE)?;
+                poll_hz = hz.parse().map_err(|_| format!("bad polling rate '{hz}'"))?;
+            }
             "-h" | "--help" => return Err(USAGE.into()),
             s if s.starts_with('-') => return Err(format!("unknown option '{s}'\n{USAGE}")),
             s => preset = s.to_string(),
@@ -70,8 +77,13 @@ fn run(args: Vec<String>) -> Result<(), String> {
         Profile::new(&load_preset(&preset)?).map_err(|e| format!("preset '{preset}': {e}"))?;
     println!("xidpipe: Ctrl+C to quit");
     // The sender stays alive here so the engine never sees a closed channel.
-    let (_keep, updates) = mpsc::channel();
-    engine::run(engine::Settings { profile, xbox }, updates, None, monitor)
+    let (_keep, commands) = mpsc::channel();
+    let settings = engine::Settings {
+        profile,
+        xbox,
+        poll_hz,
+    };
+    engine::run(settings, commands, None, monitor)
 }
 
 pub fn parse_ip(s: &str) -> Result<IpAddr, String> {

@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Virtual controller backends.
 
+use crate::engine::Rumble;
 use crate::pad::{Backend, Out, Profile};
+use std::sync::Arc;
 
+/// A virtual controller. Backends that support rumble report it through the [`Rumble`] they
+/// were opened with, from their own thread, the moment the game asks for it.
 pub trait Output {
     fn send(&mut self, o: &Out) -> Result<(), String>;
-    /// New rumble level (left/heavy motor, right/light motor) if the game changed it.
-    fn rumble(&mut self) -> Option<(u16, u16)> {
-        None
-    }
 }
 
 struct Null;
@@ -19,14 +19,14 @@ impl Output for Null {
 }
 
 /// Create the virtual controller for Xbox pad `pad` (1-12).
-pub fn open(p: &Profile, pad: u8) -> Result<Box<dyn Output>, String> {
+pub fn open(p: &Profile, pad: u8, rumble: &Arc<Rumble>) -> Result<Box<dyn Output>, String> {
     match p.backend {
         Backend::None => Ok(Box::new(Null)),
         #[cfg(windows)]
         Backend::Vjoy => crate::vjoy::open(p, pad),
         #[cfg(not(windows))]
         Backend::Vjoy => Err(format!("pad {pad}: vJoy is Windows-only")),
-        b => imp::open(b),
+        b => imp::open(b, pad, rumble.clone()),
     }
 }
 
@@ -45,14 +45,13 @@ pub fn available() -> Vec<Backend> {
 #[cfg(windows)]
 mod imp {
     use super::*;
-    use std::sync::mpsc;
     use vigem_client::{
         Client, DS4Report, DualShock4Wired, TargetId, XButtons, XGamepad, Xbox360Wired,
     };
 
     const VIGEM_HELP: &str = "is ViGEmBus installed? https://github.com/nefarius/ViGEmBus/releases";
 
-    pub fn open(b: Backend) -> Result<Box<dyn Output>, String> {
+    pub fn open(b: Backend, pad: u8, rumble: Arc<Rumble>) -> Result<Box<dyn Output>, String> {
         let client = Client::connect().map_err(|e| format!("ViGEmBus: {e:?} ({VIGEM_HELP})"))?;
         if b == Backend::Dinput {
             let mut t = DualShock4Wired::new(client, TargetId::DUALSHOCK4_WIRED);
@@ -65,19 +64,21 @@ mod imp {
         t.plugin()
             .and_then(|_| t.wait_ready())
             .map_err(|e| format!("ViGEm X360: {e:?}"))?;
-        // The notification thread ends by itself when the target is unplugged (dropped).
-        let (tx, rumble) = mpsc::channel();
+        // Rumble goes to the Xbox straight from this thread. It ends by itself when the target
+        // is unplugged (dropped).
         t.request_notification()
             .map_err(|e| format!("ViGEm X360 rumble: {e:?}"))?
             .spawn_thread(move |_, n| {
-                let _ = tx.send((n.large_motor as u16 * 257, n.small_motor as u16 * 257));
+                rumble.set(
+                    pad,
+                    (n.large_motor as u16 * 257, n.small_motor as u16 * 257),
+                );
             });
-        Ok(Box::new(X360 { t, rumble }))
+        Ok(Box::new(X360 { t }))
     }
 
     struct X360 {
         t: Xbox360Wired<Client>,
-        rumble: mpsc::Receiver<(u16, u16)>,
     }
     impl Output for X360 {
         fn send(&mut self, o: &Out) -> Result<(), String> {
@@ -92,9 +93,6 @@ mod imp {
                 thumb_ry: ry,
             };
             self.t.update(&g).map_err(|e| format!("{e:?}"))
-        }
-        fn rumble(&mut self) -> Option<(u16, u16)> {
-            self.rumble.try_iter().last()
         }
     }
 
@@ -162,6 +160,71 @@ mod imp {
     }
 }
 
+/// Linux force-feedback bookkeeping: which rumble effects games uploaded and which are playing.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Default)]
+struct FfState {
+    /// effect id -> (strong, weak magnitude, length ms; 0 = until stopped)
+    effects: std::collections::HashMap<u16, (u16, u16, u16)>,
+    /// effect id -> when it stops by itself
+    playing: std::collections::HashMap<u16, Option<std::time::Instant>>,
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl FfState {
+    fn upload(&mut self, id: u16, strong: u16, weak: u16, length_ms: u16) {
+        self.effects.insert(id, (strong, weak, length_ms));
+    }
+    fn erase(&mut self, id: u16) {
+        self.effects.remove(&id);
+        self.playing.remove(&id);
+    }
+    fn play(&mut self, id: u16, on: bool, now: std::time::Instant) {
+        match self.effects.get(&id) {
+            Some(&(_, _, len)) if on => {
+                let end = (len > 0).then(|| now + std::time::Duration::from_millis(len as u64));
+                self.playing.insert(id, end);
+            }
+            _ => {
+                self.playing.remove(&id);
+            }
+        }
+    }
+    /// Motor levels now (strongest playing effect per motor); drops finished effects.
+    fn level(&mut self, now: std::time::Instant) -> (u16, u16) {
+        self.playing.retain(|_, end| end.is_none_or(|e| now < e));
+        self.playing
+            .keys()
+            .filter_map(|id| self.effects.get(id))
+            .fold((0, 0), |a, e| (a.0.max(e.0), a.1.max(e.1)))
+    }
+    /// When the next timed effect ends, so the waiter can wake exactly then.
+    fn next_end(&self) -> Option<std::time::Instant> {
+        self.playing.values().flatten().min().copied()
+    }
+}
+
+#[test]
+fn ff_effects() {
+    use std::time::{Duration, Instant};
+    let t = Instant::now();
+    let mut ff = FfState::default();
+    ff.upload(0, 1000, 200, 0);
+    ff.upload(1, 500, 900, 100);
+    ff.play(0, true, t);
+    ff.play(1, true, t);
+    assert_eq!(ff.level(t), (1000, 900));
+    assert_eq!(ff.next_end(), Some(t + Duration::from_millis(100)));
+    assert_eq!(ff.level(t + Duration::from_millis(150)), (1000, 200)); // timed effect ended
+    ff.play(0, false, t);
+    assert_eq!(ff.level(t), (0, 0));
+    ff.play(1, true, t);
+    ff.erase(1);
+    assert_eq!(ff.level(t), (0, 0));
+    ff.play(7, true, t); // never uploaded: ignored
+    assert_eq!(ff.level(t), (0, 0));
+}
+
 #[cfg(target_os = "linux")]
 mod imp {
     use super::*;
@@ -170,9 +233,9 @@ mod imp {
         AbsInfo, AbsoluteAxisCode as Abs, AttributeSet, BusType, EventSummary, EventType,
         FFEffectCode, FFEffectKind, InputEvent, InputId, KeyCode, UInputCode, UinputAbsSetup,
     };
-    use std::collections::HashMap;
-    use std::os::fd::AsRawFd;
-    use std::time::{Duration, Instant};
+    use std::os::fd::{AsRawFd, RawFd};
+    use std::sync::{Mutex, Weak};
+    use std::time::Instant;
 
     // Same codes as the kernel's xpad driver, so SDL/Steam/Wine treat "xinput" as a real 360 pad.
     // (xpad reports X as BTN_NORTH and Y as BTN_WEST.)
@@ -190,7 +253,7 @@ mod imp {
         (0x0080, KeyCode::BTN_THUMBR),
     ];
 
-    pub fn open(b: Backend) -> Result<Box<dyn Output>, String> {
+    pub fn open(b: Backend, pad: u8, rumble: Arc<Rumble>) -> Result<Box<dyn Output>, String> {
         let (vid, pid, name) = match b {
             Backend::Xinput => (0x045e, 0x028e, "Microsoft X-Box 360 pad (xidpipe)"),
             _ => (0x0000, 0x0000, "xidpipe pad"),
@@ -222,7 +285,7 @@ mod imp {
                 d = d.with_absolute_axis(&UinputAbsSetup::new(code, info))?;
             }
             let dev = d.build()?;
-            // Rumble requests are polled from the network loop, which must never block on them.
+            // The rumble thread waits with poll(); reads themselves must never block.
             let fd = dev.as_raw_fd();
             unsafe {
                 let flags = libc::fcntl(fd, libc::F_GETFL);
@@ -235,22 +298,76 @@ mod imp {
         let dev = build().map_err(|e| {
             format!("uinput: {e} (need write access to /dev/uinput, see README: Linux permissions)")
         })?;
-        Ok(Box::new(Uinput {
-            dev,
-            effects: HashMap::new(),
-            playing: HashMap::new(),
-            last: (0, 0),
-        }))
+        let fd = dev.as_raw_fd();
+        let dev = Arc::new(Mutex::new(dev));
+        let weak = Arc::downgrade(&dev);
+        std::thread::Builder::new()
+            .name(format!("rumble-{pad}"))
+            .spawn(move || rumble_thread(weak, fd, pad, rumble))
+            .map_err(|e| e.to_string())?;
+        Ok(Box::new(Uinput(dev)))
     }
 
-    struct Uinput {
-        dev: VirtualDevice,
-        /// effect id -> (strong, weak magnitude, length ms; 0 = until stopped)
-        effects: HashMap<u16, (u16, u16, u16)>,
-        /// effect id -> when it stops by itself
-        playing: HashMap<u16, Option<Instant>>,
-        last: (u16, u16),
+    /// Waits on the device for force-feedback requests and forwards motor levels as soon as
+    /// they change. Ends when the device is dropped.
+    fn rumble_thread(dev: Weak<Mutex<VirtualDevice>>, fd: RawFd, pad: u8, rumble: Arc<Rumble>) {
+        let mut ff = FfState::default();
+        let mut last = (0, 0);
+        loop {
+            // Wake on a request, when a timed effect ends, or every 250 ms to notice the device is gone.
+            let wait = ff.next_end().map_or(250, |e| {
+                e.saturating_duration_since(Instant::now())
+                    .as_millis()
+                    .min(250) as i32
+            });
+            let mut pfd = libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            unsafe { libc::poll(&mut pfd, 1, wait) };
+            let Some(dev) = dev.upgrade() else { return };
+            let mut d = dev.lock().unwrap();
+            let now = Instant::now();
+            // WouldBlock (nothing queued) and other read errors both just mean "no new requests".
+            let events: Vec<InputEvent> =
+                d.fetch_events().map(|it| it.collect()).unwrap_or_default();
+            for ev in events {
+                match ev.destructure() {
+                    EventSummary::UInput(e, UInputCode::UI_FF_UPLOAD, ..) => {
+                        if let Ok(mut up) = d.process_ff_upload(e) {
+                            let data = up.effect();
+                            let (s, w) = match data.kind {
+                                FFEffectKind::Rumble {
+                                    strong_magnitude,
+                                    weak_magnitude,
+                                } => (strong_magnitude, weak_magnitude),
+                                _ => (0, 0),
+                            };
+                            // The kernel already picked the effect id; keep it.
+                            ff.upload(up.effect_id() as u16, s, w, data.replay.length);
+                            up.set_retval(0);
+                        }
+                    }
+                    EventSummary::UInput(e, UInputCode::UI_FF_ERASE, ..) => {
+                        if let Ok(er) = d.process_ff_erase(e) {
+                            ff.erase(er.effect_id() as u16);
+                        }
+                    }
+                    EventSummary::ForceFeedback(_, code, value) => ff.play(code.0, value > 0, now),
+                    _ => {}
+                }
+            }
+            drop(d);
+            let level = ff.level(now);
+            if level != last {
+                last = level;
+                rumble.set(pad, level);
+            }
+        }
     }
+
+    struct Uinput(Arc<Mutex<VirtualDevice>>);
 
     impl Output for Uinput {
         fn send(&mut self, o: &Out) -> Result<(), String> {
@@ -271,66 +388,7 @@ mod imp {
                 abs(Abs::ABS_HAT0X, on(0x0008) as i32 - on(0x0004) as i32),
                 abs(Abs::ABS_HAT0Y, on(0x0002) as i32 - on(0x0001) as i32),
             ]);
-            self.dev.emit(&ev).map_err(|e| e.to_string())
-        }
-
-        fn rumble(&mut self) -> Option<(u16, u16)> {
-            let now = Instant::now();
-            // WouldBlock (nothing queued) and other read errors both just mean "no new requests".
-            let events: Vec<InputEvent> = self
-                .dev
-                .fetch_events()
-                .map(|it| it.collect())
-                .unwrap_or_default();
-            for ev in events {
-                match ev.destructure() {
-                    EventSummary::UInput(e, UInputCode::UI_FF_UPLOAD, ..) => {
-                        if let Ok(mut up) = self.dev.process_ff_upload(e) {
-                            let d = up.effect();
-                            let (s, w) = match d.kind {
-                                FFEffectKind::Rumble {
-                                    strong_magnitude,
-                                    weak_magnitude,
-                                } => (strong_magnitude, weak_magnitude),
-                                _ => (0, 0),
-                            };
-                            // The kernel already picked the effect id; keep it.
-                            self.effects
-                                .insert(up.effect_id() as u16, (s, w, d.replay.length));
-                            up.set_retval(0);
-                        }
-                    }
-                    EventSummary::UInput(e, UInputCode::UI_FF_ERASE, ..) => {
-                        if let Ok(er) = self.dev.process_ff_erase(e) {
-                            let id = er.effect_id() as u16;
-                            self.effects.remove(&id);
-                            self.playing.remove(&id);
-                        }
-                    }
-                    EventSummary::ForceFeedback(_, code, value) => {
-                        if value > 0 {
-                            if let Some(&(_, _, len)) = self.effects.get(&code.0) {
-                                let end =
-                                    (len > 0).then(|| now + Duration::from_millis(len as u64));
-                                self.playing.insert(code.0, end);
-                            }
-                        } else {
-                            self.playing.remove(&code.0);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            self.playing.retain(|_, end| end.is_none_or(|e| now < e));
-            let level = self
-                .playing
-                .keys()
-                .filter_map(|id| self.effects.get(id))
-                .fold((0, 0), |a, e| (a.0.max(e.0), a.1.max(e.1)));
-            (level != self.last).then(|| {
-                self.last = level;
-                level
-            })
+            self.0.lock().unwrap().emit(&ev).map_err(|e| e.to_string())
         }
     }
 }
@@ -338,7 +396,7 @@ mod imp {
 #[cfg(not(any(windows, target_os = "linux")))]
 mod imp {
     use super::*;
-    pub fn open(_: Backend) -> Result<Box<dyn Output>, String> {
+    pub fn open(_: Backend, _: u8, _: Arc<Rumble>) -> Result<Box<dyn Output>, String> {
         Err("no virtual controller support on this OS yet; use backend = \"none\"".into())
     }
 }

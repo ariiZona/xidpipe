@@ -2,10 +2,12 @@
 //! The window: pick, edit and save presets; see live input, output and rumble per controller.
 //! Every change applies immediately; the network loop runs on its own thread and never waits on the UI.
 
-use crate::engine::{self, PadView, Settings, Status};
+use crate::engine::{self, Command, PadView, Settings, Status};
 use crate::output;
-use crate::pad::{self, Backend, Preset, Profile};
-use eframe::egui::{self, Color32, RichText, Sense, Stroke, Ui, vec2};
+use crate::pad::{self, Backend, Preset, Profile, Xid};
+use eframe::egui::{
+    self, Align2, Color32, CornerRadius, FontId, Rect, RichText, Sense, Stroke, Ui, pos2, vec2,
+};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -54,6 +56,7 @@ pub fn run() -> Result<(), String> {
                 Settings {
                     profile,
                     xbox: None,
+                    poll_hz: 0,
                 },
                 rx,
                 Some(st.clone()),
@@ -66,7 +69,9 @@ pub fn run() -> Result<(), String> {
         .map_err(|e| e.to_string())?;
 
     let app = App {
-        applied: (preset.clone(), String::new()),
+        applied: (preset.clone(), String::new(), 0),
+        poll_hz: 0,
+        tab: Tab::Setup,
         name,
         preset,
         xbox_ip: String::new(),
@@ -90,14 +95,16 @@ struct App {
     name: String,
     preset: Preset,
     /// What the engine currently runs, to notice edits.
-    applied: (Preset, String),
+    applied: (Preset, String, u16),
+    poll_hz: u16,
+    tab: Tab,
     xbox_ip: String,
     save_as: String,
     /// Result of the last load/save: (text, is error)
     note: Option<(String, bool)>,
     /// Why the current edit can't be applied
     invalid: Option<String>,
-    tx: Sender<Settings>,
+    tx: Sender<Command>,
     status: Arc<Mutex<Status>>,
 }
 
@@ -106,22 +113,59 @@ impl eframe::App for App {
         // Live view: ~60 fps while open. Input latency doesn't depend on this.
         ui.ctx().request_repaint_after(Duration::from_millis(16));
         self.apply();
-        egui::Panel::left("settings")
-            .resizable(true)
-            .default_size(340.0)
-            .show(ui, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| self.settings_ui(ui));
+        egui::Panel::top("tabs").show(ui, |ui| {
+            ui.horizontal(|ui| {
+                for (tab, label) in [
+                    (Tab::Setup, "Setup"),
+                    (Tab::Tester, "Button tester"),
+                    (Tab::Debug, "Debug"),
+                ] {
+                    ui.selectable_value(&mut self.tab, tab, label);
+                }
+                ui.separator();
+                match self.status.lock().unwrap().xbox {
+                    Some(a) => ui.label(format!("Xbox: {a}")),
+                    None => ui.label("Looking for the Xbox..."),
+                };
             });
-        egui::CentralPanel::default().show(ui, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| self.live_ui(ui));
         });
+        match self.tab {
+            Tab::Setup => {
+                egui::Panel::left("settings")
+                    .resizable(true)
+                    .default_size(340.0)
+                    .show(ui, |ui| {
+                        egui::ScrollArea::vertical().show(ui, |ui| self.settings_ui(ui));
+                    });
+                egui::CentralPanel::default().show(ui, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| self.live_ui(ui));
+                });
+            }
+            Tab::Tester => {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| self.tester_ui(ui));
+                });
+            }
+            Tab::Debug => {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| self.debug_ui(ui));
+                });
+            }
+        }
     }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Tab {
+    Setup,
+    Tester,
+    Debug,
 }
 
 impl App {
     /// Send the edited preset to the engine whenever it changed and is valid.
     fn apply(&mut self) {
-        let current = (self.preset.clone(), self.xbox_ip.clone());
+        let current = (self.preset.clone(), self.xbox_ip.clone(), self.poll_hz);
         if current == self.applied {
             return;
         }
@@ -133,7 +177,12 @@ impl App {
         match (Profile::new(&self.preset), xbox) {
             (Ok(profile), Ok(xbox)) => {
                 self.invalid = None;
-                let _ = self.tx.send(Settings { profile, xbox });
+                let poll_hz = self.poll_hz;
+                let _ = self.tx.send(Command::Settings(Settings {
+                    profile,
+                    xbox,
+                    poll_hz,
+                }));
             }
             (Err(e), _) | (_, Err(e)) => self.invalid = Some(e),
         }
@@ -335,6 +384,21 @@ impl App {
         .on_hover_text(
             "Only needed if the Xbox isn't found: type the IP shown on the Xbox screen.",
         );
+        ui.horizontal(|ui| {
+            ui.label("Controller polling");
+            egui::ComboBox::from_id_salt("poll")
+                .selected_text(poll_label(self.poll_hz))
+                .show_ui(ui, |ui| {
+                    for hz in POLL_RATES {
+                        ui.selectable_value(&mut self.poll_hz, hz, poll_label(hz));
+                    }
+                });
+        })
+        .response
+        .on_hover_text(
+            "How often the Xbox asks the controller for its state. Faster lowers input delay; \
+             almost every controller handles 1000 Hz, but pick a lower rate if one misbehaves.",
+        );
 
         if let Some(e) = &self.invalid {
             ui.separator();
@@ -401,19 +465,7 @@ impl App {
                 (o[2], o[3]),
                 self.preset.right_stick_deadzone,
             );
-            ui.vertical(|ui| {
-                for (i, name) in IN_ANALOG.iter().enumerate() {
-                    let val = v.raw.analog[i];
-                    ui.horizontal(|ui| {
-                        ui.add_sized([44.0, 16.0], egui::Label::new(*name));
-                        ui.add(
-                            egui::ProgressBar::new(val as f32 / 255.0)
-                                .desired_width(150.0)
-                                .text(val.to_string()),
-                        );
-                    });
-                }
-            });
+            ui.vertical(|ui| analog_bars(ui, &v.raw));
         });
         let pressed_in: Vec<&str> = IN_DIGITAL
             .iter()
@@ -433,6 +485,369 @@ impl App {
             v.out.rt
         ));
     }
+
+    /// Button tester: the raw controller as the Xbox reads it, before deadzones and mapping.
+    fn tester_ui(&self, ui: &mut Ui) {
+        let pads = self.status.lock().unwrap().pads.clone();
+        ui.heading("Button tester");
+        ui.label(
+            "Raw controller input as the Xbox reads it, before deadzones and mapping. \
+             A B X Y, Black, White and the triggers fill up with how hard they're pressed.",
+        );
+        if pads.is_empty() {
+            ui.label("No controller yet. Plug one into the Xbox.");
+        }
+        for (id, v) in &pads {
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.strong(format!(
+                    "Pad {id}{}",
+                    if v.linked { "" } else { " (no data)" }
+                ));
+                ui.horizontal(|ui| {
+                    pad_drawing(ui, &v.raw);
+                    ui.vertical(|ui| {
+                        analog_bars(ui, &v.raw);
+                        let s = v.raw.sticks;
+                        ui.label(
+                            RichText::new(format!(
+                                "left stick  {:6} {:6}\nright stick {:6} {:6}",
+                                s[0], s[1], s[2], s[3]
+                            ))
+                            .monospace(),
+                        );
+                        let pressed: Vec<&str> = IN_DIGITAL
+                            .iter()
+                            .filter(|b| v.raw.digital & b.0 != 0)
+                            .map(|b| b.1)
+                            .collect();
+                        ui.label(format!("Pressed: {}", pressed.join(" ")));
+                    });
+                });
+            });
+        }
+    }
+
+    fn debug_ui(&mut self, ui: &mut Ui) {
+        let (xbox, rtt, pads, log, error) = {
+            let s = self.status.lock().unwrap();
+            (
+                s.xbox,
+                s.rtt,
+                s.pads.clone(),
+                s.log.clone(),
+                s.error.clone(),
+            )
+        };
+        let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+        ui.heading("Connection");
+        egui::Grid::new("connection")
+            .num_columns(2)
+            .striped(true)
+            .show(ui, |ui| {
+                ui.label("Xbox");
+                ui.label(xbox.map_or("not found yet".into(), |a| a.to_string()));
+                ui.end_row();
+                ui.label("Network round trip");
+                ui.label(rtt.map_or("-".into(), |(now, best, avg)| {
+                    format!(
+                        "{:.2} ms now, {:.2} ms best, {:.2} ms average",
+                        ms(now),
+                        ms(best),
+                        ms(avg)
+                    )
+                }));
+                ui.end_row();
+                ui.label("Polling asked of the Xbox");
+                ui.label(poll_label(self.poll_hz));
+                ui.end_row();
+            });
+        if let Some(e) = error {
+            ui.colored_label(ERROR, e);
+        }
+
+        ui.separator();
+        ui.heading("Controllers");
+        if pads.is_empty() {
+            ui.label("No controller yet.");
+        }
+        for (&id, v) in &pads {
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.strong(format!("Pad {id}"));
+                egui::Grid::new(("debug", id))
+                    .num_columns(2)
+                    .striped(true)
+                    .show(ui, |ui| {
+                        let mut row = |k: &str, val: String| {
+                            ui.label(k);
+                            ui.label(val);
+                            ui.end_row();
+                        };
+                        row("USB id", format!("{:04x}:{:04x}", v.vid, v.pid));
+                        if let Some(i) = v.info {
+                            row("XID type", xid_label(i.xid));
+                            row(
+                                "Polling",
+                                format!(
+                                    "controller asks every {} ms, polled every {} ms ({} Hz)",
+                                    i.dev_interval,
+                                    i.interval,
+                                    1000 / i.interval.max(1) as u32
+                                ),
+                            );
+                            row("USB reports/s (Xbox)", i.reports_per_s.to_string());
+                            row("USB errors", i.usb_errors.to_string());
+                            row(
+                                "Rumble motors",
+                                if i.has_rumble {
+                                    "yes"
+                                } else {
+                                    "no OUT endpoint"
+                                }
+                                .into(),
+                            );
+                        } else {
+                            row("Xbox details", "waiting (sent once a second)".into());
+                        }
+                        row(
+                            "Packets/s received (PC)",
+                            format!("{:.0}, longest gap {:.1} ms", v.rate, ms(v.worst_gap)),
+                        );
+                        row("Lost packets", v.lost.to_string());
+                        row(
+                            "Last packet",
+                            v.last_rx
+                                .map_or("-".into(), |t| format!("{:.0} ms ago", ms(t.elapsed()))),
+                        );
+                        let pct = |m: u16| m as u32 * 100 / 65535;
+                        row(
+                            "Rumble now",
+                            format!("left {}%, right {}%", pct(v.rumble.0), pct(v.rumble.1)),
+                        );
+                        row(
+                            "Raw report",
+                            v.report
+                                .iter()
+                                .map(|b| format!("{b:02x}"))
+                                .collect::<Vec<_>>()
+                                .join(" "),
+                        );
+                        if let Some(e) = &v.error {
+                            row("Backend error", e.clone());
+                        }
+                    });
+                ui.horizontal(|ui| {
+                    ui.label("Test rumble:");
+                    let half = 0x8000;
+                    let tests = [
+                        ("Left motor", (half, 0)),
+                        ("Right motor", (0, half)),
+                        ("Both, full", (0xffff, 0xffff)),
+                        ("Stop", (0, 0)),
+                    ];
+                    for (label, level) in tests {
+                        if ui.button(label).clicked() {
+                            let time = Duration::from_millis(if level == (0, 0) { 0 } else { 700 });
+                            let _ = self.tx.send(Command::TestRumble {
+                                pad: id,
+                                level,
+                                time,
+                            });
+                        }
+                    }
+                });
+            });
+        }
+
+        ui.separator();
+        ui.heading("Log");
+        egui::ScrollArea::vertical()
+            .id_salt("log")
+            .max_height(220.0)
+            .stick_to_bottom(true)
+            .show(ui, |ui| {
+                for line in &log {
+                    ui.label(RichText::new(line).monospace().small());
+                }
+            });
+    }
+}
+
+const POLL_RATES: [u16; 5] = [0, 125, 250, 500, 1000];
+
+fn poll_label(hz: u16) -> String {
+    match hz {
+        0 => "Auto (controller's own rate, at least 125 Hz)".into(),
+        hz => format!("{hz} Hz (every {} ms)", engine::poll_ms(hz)),
+    }
+}
+
+fn xid_label((t, sub): (u8, u8)) -> String {
+    let name = match (t, sub) {
+        (0, 0) => return "none: no XID descriptor (some 3rd-party pads)".into(),
+        (1, 1) => "gamepad (Duke)",
+        (1, 2) => "gamepad (S)",
+        (1, 0x10) => "steering wheel",
+        (1, 0x20) => "arcade stick",
+        (1, _) => "gamepad",
+        _ => "unknown",
+    };
+    format!("{t:02x}/{sub:02x} {name}")
+}
+
+/// Analog values as bars, with the number on each bar for screen readers and exact reading.
+fn analog_bars(ui: &mut Ui, x: &Xid) {
+    for (i, name) in IN_ANALOG.iter().enumerate() {
+        let val = x.analog[i];
+        ui.horizontal(|ui| {
+            ui.add_sized([44.0, 16.0], egui::Label::new(*name));
+            ui.add(
+                egui::ProgressBar::new(val as f32 / 255.0)
+                    .desired_width(150.0)
+                    .text(val.to_string()),
+            );
+        });
+    }
+}
+
+const GREEN: Color32 = Color32::from_rgb(0x3c, 0xb0, 0x43);
+const RED: Color32 = Color32::from_rgb(0xd0, 0x3a, 0x3a);
+const BLUE: Color32 = Color32::from_rgb(0x3a, 0x70, 0xd0);
+const YELLOW: Color32 = Color32::from_rgb(0xe0, 0xc0, 0x30);
+const PAD_WHITE: Color32 = Color32::from_rgb(0xe8, 0xe8, 0xe8);
+const PAD_BLACK: Color32 = Color32::from_rgb(0x30, 0x30, 0x30);
+
+/// A schematic controller that lights up with the input.
+fn pad_drawing(ui: &mut Ui, x: &Xid) {
+    let (rect, _) = ui.allocate_exact_size(vec2(380.0, 230.0), Sense::hover());
+    let p = ui.painter_at(rect);
+    let vis = ui.visuals().clone();
+    let at = |px: f32, py: f32| rect.min + vec2(px, py);
+    let accent = vis.selection.bg_fill;
+    let idle = vis.widgets.inactive.bg_fill;
+    let ink = vis.strong_text_color();
+
+    // Body and grips
+    let body = vis.extreme_bg_color;
+    p.circle_filled(at(95.0, 160.0), 55.0, body);
+    p.circle_filled(at(285.0, 160.0), 55.0, body);
+    p.rect_filled(
+        Rect::from_min_max(at(35.0, 30.0), at(345.0, 160.0)),
+        CornerRadius::same(60),
+        body,
+    );
+
+    // Triggers: bars that fill with pressure
+    for (i, x0, label) in [(6, 55.0, "LT"), (7, 235.0, "RT")] {
+        let r = Rect::from_min_max(at(x0, 6.0), at(x0 + 90.0, 20.0));
+        p.rect_filled(r, CornerRadius::same(3), idle);
+        let fill = Rect::from_min_max(
+            r.min,
+            pos2(r.min.x + r.width() * x.analog[i] as f32 / 255.0, r.max.y),
+        );
+        p.rect_filled(fill, CornerRadius::same(3), accent);
+        p.text(
+            r.center(),
+            Align2::CENTER_CENTER,
+            label,
+            FontId::proportional(11.0),
+            ink,
+        );
+    }
+
+    // Sticks: ring, and a knob that moves; the knob lights up when the stick is clicked
+    for (c, sx, sy, bit) in [
+        (at(95.0, 80.0), x.sticks[0], x.sticks[1], 0x40),
+        (at(235.0, 140.0), x.sticks[2], x.sticks[3], 0x80),
+    ] {
+        p.circle_stroke(c, 24.0, Stroke::new(1.5, vis.weak_text_color()));
+        let knob = c + vec2(sx as f32 / 32767.0 * 14.0, -(sy as f32) / 32767.0 * 14.0);
+        p.circle_filled(
+            knob,
+            10.0,
+            if x.digital & bit != 0 {
+                accent
+            } else {
+                vis.weak_text_color()
+            },
+        );
+    }
+
+    // D-pad
+    let c = at(140.0, 140.0);
+    p.rect_filled(
+        Rect::from_center_size(c, vec2(14.0, 14.0)),
+        CornerRadius::same(2),
+        idle,
+    );
+    for (bit, dx, dy) in [
+        (0x01u8, 0.0, -1.0),
+        (0x02, 0.0, 1.0),
+        (0x04, -1.0, 0.0),
+        (0x08, 1.0, 0.0),
+    ] {
+        let r = Rect::from_center_size(c + vec2(dx * 15.0, dy * 15.0), vec2(14.0, 14.0));
+        p.rect_filled(
+            r,
+            CornerRadius::same(3),
+            if x.digital & bit != 0 { accent } else { idle },
+        );
+    }
+
+    // Back / Start
+    for (pos, bit, label) in [
+        (at(170.0, 100.0), 0x20u8, "Back"),
+        (at(205.0, 100.0), 0x10, "Start"),
+    ] {
+        p.circle_filled(pos, 6.0, if x.digital & bit != 0 { accent } else { idle });
+        p.text(
+            pos + vec2(0.0, 13.0),
+            Align2::CENTER_CENTER,
+            label,
+            FontId::proportional(9.0),
+            ink,
+        );
+    }
+
+    // Face buttons, Black and White: the coloured disc grows with pressure
+    let c = at(290.0, 80.0);
+    let buttons = [
+        (c + vec2(0.0, 20.0), 11.0, GREEN, x.analog[0], "A"),
+        (c + vec2(20.0, 0.0), 11.0, RED, x.analog[1], "B"),
+        (c + vec2(-20.0, 0.0), 11.0, BLUE, x.analog[2], "X"),
+        (c + vec2(0.0, -20.0), 11.0, YELLOW, x.analog[3], "Y"),
+        (at(270.0, 120.0), 8.0, PAD_WHITE, x.analog[5], ""),
+        (at(310.0, 120.0), 8.0, PAD_BLACK, x.analog[4], ""),
+    ];
+    for (pos, r, color, v, label) in buttons {
+        p.circle_filled(pos, r, color.gamma_multiply(0.2));
+        if v > 0 {
+            p.circle_filled(pos, r * (0.35 + 0.65 * v as f32 / 255.0), color);
+        }
+        p.circle_stroke(pos, r, Stroke::new(1.0, color));
+        if !label.is_empty() {
+            p.text(
+                pos,
+                Align2::CENTER_CENTER,
+                label,
+                FontId::proportional(11.0),
+                ink,
+            );
+        }
+    }
+    p.text(
+        at(270.0, 133.0),
+        Align2::CENTER_CENTER,
+        "White",
+        FontId::proportional(9.0),
+        ink,
+    );
+    p.text(
+        at(310.0, 133.0),
+        Align2::CENTER_CENTER,
+        "Black",
+        FontId::proportional(9.0),
+        ink,
+    );
 }
 
 fn backend_label(b: Backend) -> &'static str {

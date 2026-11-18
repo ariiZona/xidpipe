@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Network loop: Xbox packets in, virtual controller updates and rumble out.
+//! Network loop: Xbox packets in, virtual controller updates out. Rumble goes the other way
+//! through [`Rumble`], straight from the backend's own thread, so it never waits on this loop.
 
 use crate::output::{self, Output};
 use crate::pad::{self, Backend, Out, Profile, Xid};
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::ErrorKind;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::mpsc::Receiver;
@@ -17,6 +18,8 @@ const MAGIC: &[u8; 2] = b"XP";
 const VERSION: u8 = 1;
 const MSG_STATE: u8 = 1;
 const MSG_UNPLUGGED: u8 = 2;
+const MSG_PONG: u8 = 3;
+const MSG_INFO: u8 = 4;
 const MSG_HELLO: u8 = 0x10;
 const MSG_RUMBLE: u8 = 0x11;
 const HEADER: usize = 14;
@@ -28,10 +31,37 @@ const HELLO_EVERY: Duration = Duration::from_secs(1);
 const RUMBLE_EVERY: Duration = Duration::from_millis(250);
 const REOPEN_AFTER: Duration = Duration::from_secs(2);
 const MAX_PADS: u8 = 12;
+const LOG_LINES: usize = 300;
 
 pub struct Settings {
     pub profile: Profile,
     pub xbox: Option<IpAddr>,
+    /// Controller USB polling rate asked of the Xbox; 0 = auto (controller's own, at least 125 Hz).
+    pub poll_hz: u16,
+}
+
+#[cfg_attr(test, allow(dead_code))] // only the window sends commands
+pub enum Command {
+    Settings(Settings),
+    /// Run the motors of `pad` for a moment, to check the rumble path without a game.
+    TestRumble {
+        pad: u8,
+        level: (u16, u16),
+        time: Duration,
+    },
+}
+
+/// What the Xbox reports about a pad once a second.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub struct XboxInfo {
+    /// Polling interval the controller asks for, and the one used (ms)
+    pub dev_interval: u8,
+    pub interval: u8,
+    /// XID type/subtype; 0/0 = the pad had no XID descriptor
+    pub xid: (u8, u8),
+    pub has_rumble: bool,
+    pub reports_per_s: u16,
+    pub usb_errors: u16,
 }
 
 /// What the GUI shows about one pad.
@@ -41,9 +71,15 @@ pub struct PadView {
     pub vid: u16,
     pub pid: u16,
     pub raw: Xid,
+    pub report: Vec<u8>,
     pub out: Out,
     pub lost: u64,
     pub linked: bool,
+    pub last_rx: Option<Instant>,
+    /// Packets per second the PC received, and the longest gap between two (last second)
+    pub rate: f32,
+    pub worst_gap: Duration,
+    pub info: Option<XboxInfo>,
     pub rumble: (u16, u16),
     pub error: Option<String>,
 }
@@ -52,8 +88,49 @@ pub struct PadView {
 #[cfg_attr(test, allow(dead_code))]
 pub struct Status {
     pub xbox: Option<SocketAddr>,
+    /// Network round trip to the Xbox app: last, best, smoothed
+    pub rtt: Option<(Duration, Duration, Duration)>,
     pub pads: BTreeMap<u8, PadView>,
     pub error: Option<String>,
+    pub log: VecDeque<String>,
+}
+
+/// Sends rumble to the Xbox the moment a backend reports it, from any thread.
+pub struct Rumble {
+    sock: UdpSocket,
+    xbox: Mutex<Option<IpAddr>>,
+    levels: Mutex<BTreeMap<u8, (u16, u16)>>,
+}
+
+impl Rumble {
+    pub fn set(&self, pad: u8, level: (u16, u16)) {
+        self.levels.lock().unwrap().insert(pad, level);
+        self.send(pad, level);
+    }
+
+    fn send(&self, pad: u8, level: (u16, u16)) {
+        if let Some(ip) = *self.xbox.lock().unwrap() {
+            let _ = self
+                .sock
+                .send_to(&rumble_packet(pad, level), (ip, XBOX_PORT));
+        }
+    }
+
+    fn resend_all(&self) {
+        let all = self.levels.lock().unwrap().clone();
+        for (pad, level) in all {
+            self.send(pad, level);
+        }
+    }
+
+    fn level(&self, pad: u8) -> (u16, u16) {
+        self.levels
+            .lock()
+            .unwrap()
+            .get(&pad)
+            .copied()
+            .unwrap_or_default()
+    }
 }
 
 struct Slot {
@@ -63,8 +140,12 @@ struct Slot {
     rx: Instant,
     linked: bool,
     lost: u64,
-    rumble: (u16, u16),
-    rumble_at: Instant,
+    // Rate measurement over the current one-second window
+    window_start: Instant,
+    window_count: u32,
+    window_gap: Duration,
+    rate: f32,
+    worst_gap: Duration,
 }
 
 /// Changing any of these needs new virtual controllers; everything else applies live.
@@ -72,57 +153,102 @@ fn output_key(p: &Profile) -> (Backend, u8) {
     (p.backend, p.vjoy_device)
 }
 
-/// Runs until the process ends. `updates` swaps settings live; `status` (GUI) gets live state.
+/// USB polling interval (ms) for a requested rate: the slowest supported interval that is
+/// at least as fast as asked. 0 stays 0 (auto).
+pub fn poll_ms(hz: u16) -> u8 {
+    if hz == 0 {
+        return 0;
+    }
+    let ms = 1000 / hz.max(1);
+    [8u8, 4, 2, 1]
+        .into_iter()
+        .find(|&m| m as u16 <= ms)
+        .unwrap_or(1)
+}
+
+/// Runs until the process ends. `commands` changes settings live; `status` (GUI) gets live state.
 pub fn run(
     mut settings: Settings,
-    updates: Receiver<Settings>,
+    commands: Receiver<Command>,
     status: Option<Arc<Mutex<Status>>>,
     monitor: bool,
 ) -> Result<(), String> {
     let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).map_err(|e| format!("bind: {e}"))?;
     sock.set_broadcast(true).map_err(|e| e.to_string())?;
-    // Short timeout only paces hellos, rumble polling and link checks; packets wake recv at once.
+    // Short timeout only paces hellos, resends and link checks; packets wake recv at once.
     sock.set_read_timeout(Some(Duration::from_millis(10)))
         .map_err(|e| e.to_string())?;
+    let rumble = Arc::new(Rumble {
+        sock: sock.try_clone().map_err(|e| e.to_string())?,
+        xbox: Mutex::new(None),
+        levels: Mutex::new(BTreeMap::new()),
+    });
     let dest = |s: &Settings| {
         SocketAddr::new(s.xbox.unwrap_or(IpAddr::V4(Ipv4Addr::BROADCAST)), XBOX_PORT)
     };
-    println!(
-        "xidpipe: backend {:?}, looking for the Xbox at {}",
-        settings.profile.backend,
-        dest(&settings)
-    );
-
-    let hello = [MAGIC[0], MAGIC[1], VERSION, MSG_HELLO];
-    let mut last_hello = Instant::now() - HELLO_EVERY;
-    let mut last_print = Instant::now();
-    let mut peer: Option<SocketAddr> = None;
-    let mut slots: HashMap<u8, Slot> = HashMap::new();
-    let mut open_failed: HashMap<u8, Instant> = HashMap::new();
-    let mut buf = [0u8; 512];
     let show = |f: &mut dyn FnMut(&mut Status)| {
         if let Some(s) = &status {
             f(&mut s.lock().unwrap());
         }
     };
+    let say = |msg: String| {
+        println!("xidpipe: {msg}");
+        show(&mut |s| {
+            if s.log.len() == LOG_LINES {
+                s.log.pop_front();
+            }
+            s.log.push_back(msg.clone());
+        });
+    };
+    say(format!(
+        "backend {:?}, looking for the Xbox at {}",
+        settings.profile.backend,
+        dest(&settings)
+    ));
+
+    let start = Instant::now();
+    let mut last_hello = start - HELLO_EVERY;
+    let mut last_rumble = start;
+    let mut last_print = start;
+    let mut peer: Option<SocketAddr> = None;
+    let mut slots: HashMap<u8, Slot> = HashMap::new();
+    let mut open_failed: HashMap<u8, Instant> = HashMap::new();
+    let mut test_stop: HashMap<u8, Instant> = HashMap::new();
+    let mut rtt: Option<(Duration, Duration, Duration)> = None;
+    let mut buf = [0u8; 512];
 
     loop {
-        if let Some(new) = updates.try_iter().last() {
-            if output_key(&new.profile) != output_key(&settings.profile) {
-                slots.clear(); // dropping them removes the old virtual controllers
-                open_failed.clear();
+        for cmd in commands.try_iter() {
+            match cmd {
+                Command::Settings(new) => {
+                    if output_key(&new.profile) != output_key(&settings.profile) {
+                        slots.clear(); // dropping them removes the old virtual controllers
+                        open_failed.clear();
+                    }
+                    if new.xbox != settings.xbox {
+                        peer = None;
+                        *rumble.xbox.lock().unwrap() = None;
+                    }
+                    if new.xbox != settings.xbox || new.poll_hz != settings.poll_hz {
+                        last_hello = start - HELLO_EVERY; // tell the Xbox right away
+                    }
+                    settings = new;
+                }
+                Command::TestRumble { pad, level, time } => {
+                    rumble.set(pad, level);
+                    test_stop.insert(pad, Instant::now() + time);
+                }
             }
-            if new.xbox != settings.xbox {
-                peer = None;
-                last_hello = Instant::now() - HELLO_EVERY;
-            }
-            settings = new;
         }
         let profile = &settings.profile;
 
         if last_hello.elapsed() >= HELLO_EVERY {
             // Errors here (no route yet, etc.) are retried next second.
-            let _ = sock.send_to(&hello, dest(&settings));
+            let ping = start.elapsed().as_micros() as u32;
+            let _ = sock.send_to(
+                &hello_packet(poll_ms(settings.poll_hz), ping),
+                dest(&settings),
+            );
             last_hello = Instant::now();
         }
 
@@ -135,16 +261,32 @@ pub fn run(
                     break 'packet;
                 };
                 if peer != Some(from) {
-                    println!("xidpipe: Xbox at {from}");
+                    say(format!("Xbox at {from}"));
                     peer = Some(from);
+                    *rumble.xbox.lock().unwrap() = Some(from.ip());
                     show(&mut |s| s.xbox = Some(from));
                 }
                 match msg {
+                    Msg::Pong { ping } => {
+                        let now = start.elapsed().as_micros() as u32;
+                        let t = Duration::from_micros(now.wrapping_sub(ping) as u64);
+                        rtt = Some(match rtt {
+                            None => (t, t, t),
+                            Some((_, best, avg)) => (t, best.min(t), (avg * 7 + t) / 8),
+                        });
+                        show(&mut |s| s.rtt = rtt);
+                    }
+                    Msg::Info { pad, info } => show(&mut |s| {
+                        if let Some(v) = s.pads.get_mut(&pad) {
+                            v.info = Some(info);
+                        }
+                    }),
                     Msg::Unplugged { pad } => {
                         if let Some(s) = slots.get_mut(&pad) {
-                            println!("xidpipe: pad {pad} unplugged");
+                            say(format!("pad {pad} unplugged"));
                             neutral(pad, s);
                         }
+                        rumble.set(pad, (0, 0));
                         show(&mut |s| {
                             s.pads.remove(&pad);
                         });
@@ -165,25 +307,29 @@ pub fn run(
                                 {
                                     break 'packet;
                                 }
-                                match output::open(profile, pad) {
+                                match output::open(profile, pad, &rumble) {
                                     Ok(out) => {
-                                        println!(
-                                            "xidpipe: pad {pad} connected (USB {vid:04x}:{pid:04x})"
-                                        );
+                                        say(format!(
+                                            "pad {pad} connected (USB {vid:04x}:{pid:04x})"
+                                        ));
                                         open_failed.remove(&pad);
+                                        let now = Instant::now();
                                         v.insert(Slot {
                                             out,
                                             last: Out::default(),
                                             seq: seq.wrapping_sub(1),
-                                            rx: Instant::now(),
+                                            rx: now,
                                             linked: false,
                                             lost: 0,
-                                            rumble: (0, 0),
-                                            rumble_at: Instant::now(),
+                                            window_start: now,
+                                            window_count: 0,
+                                            window_gap: Duration::ZERO,
+                                            rate: 0.0,
+                                            worst_gap: Duration::ZERO,
                                         })
                                     }
                                     Err(e) => {
-                                        eprintln!("xidpipe: pad {pad}: {e}");
+                                        say(format!("pad {pad}: {e}"));
                                         open_failed.insert(pad, Instant::now());
                                         show(&mut |s| {
                                             s.pads.entry(pad).or_default().error = Some(e.clone())
@@ -197,17 +343,28 @@ pub fn run(
                         if s.linked && (ahead == 0 || ahead > u32::MAX / 2) {
                             break 'packet; // duplicate or reordered: a newer state was already applied
                         }
+                        let now = Instant::now();
                         if s.linked {
                             s.lost += (ahead - 1) as u64;
+                            s.window_gap = s.window_gap.max(now - s.rx);
+                        }
+                        s.window_count += 1;
+                        let window = now - s.window_start;
+                        if window >= Duration::from_secs(1) {
+                            s.rate = s.window_count as f32 / window.as_secs_f32();
+                            s.worst_gap = s.window_gap;
+                            s.window_start = now;
+                            s.window_count = 0;
+                            s.window_gap = Duration::ZERO;
                         }
                         s.seq = seq;
-                        s.rx = Instant::now();
+                        s.rx = now;
                         s.linked = true;
                         let x = pad::parse(report);
                         let o = profile.apply(&x);
                         if o != s.last {
                             if let Err(e) = s.out.send(&o) {
-                                eprintln!("xidpipe: pad {pad}: output failed ({e}), recreating it");
+                                say(format!("pad {pad}: output failed ({e}), recreating it"));
                                 slots.remove(&pad);
                                 break 'packet;
                             }
@@ -217,21 +374,26 @@ pub fn run(
                             last_print = Instant::now();
                             println!("pad {pad} in  {x:?}\n      out {o:?} lost={}", s.lost);
                         }
-                        let (lost, rumble) = (s.lost, s.rumble);
+                        let level = rumble.level(pad);
+                        let (lost, rate, worst_gap) = (s.lost, s.rate, s.worst_gap);
                         show(&mut |st| {
-                            st.pads.insert(
-                                pad,
-                                PadView {
-                                    vid,
-                                    pid,
-                                    raw: x,
-                                    out: o,
-                                    lost,
-                                    linked: true,
-                                    rumble,
-                                    error: None,
-                                },
-                            );
+                            let v = st.pads.entry(pad).or_default();
+                            let info = v.info;
+                            *v = PadView {
+                                vid,
+                                pid,
+                                raw: x,
+                                report: report.to_vec(),
+                                out: o,
+                                lost,
+                                linked: true,
+                                last_rx: Some(now),
+                                rate,
+                                worst_gap,
+                                info,
+                                rumble: level,
+                                error: None,
+                            };
                         });
                     }
                 }
@@ -243,13 +405,15 @@ pub fn run(
                     e.kind(),
                     ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::ConnectionReset
                 ) => {}
-            Err(e) => eprintln!("xidpipe: recv: {e}"),
+            Err(e) => say(format!("recv: {e}")),
         }
 
+        // Never leave a button held if the network or the Xbox goes away.
         for (&pad, s) in slots.iter_mut() {
-            // Never leave a button held if the network or the Xbox goes away.
             if s.linked && s.rx.elapsed() > LINK_TIMEOUT {
-                println!("xidpipe: pad {pad}: no data from the Xbox, releasing all inputs");
+                say(format!(
+                    "pad {pad}: no data from the Xbox, releasing all inputs"
+                ));
                 neutral(pad, s);
                 show(&mut |st| {
                     if let Some(v) = st.pads.get_mut(&pad) {
@@ -257,16 +421,17 @@ pub fn run(
                     }
                 });
             }
-            let changed = s.out.rumble();
-            if let Some(r) = changed {
-                s.rumble = r;
+        }
+        test_stop.retain(|&pad, until| {
+            let running = Instant::now() < *until;
+            if !running {
+                rumble.set(pad, (0, 0));
             }
-            if let Some(to) = peer
-                && (changed.is_some() || s.rumble_at.elapsed() >= RUMBLE_EVERY)
-            {
-                let _ = sock.send_to(&rumble_packet(pad, s.rumble), to);
-                s.rumble_at = Instant::now();
-            }
+            running
+        });
+        if last_rumble.elapsed() >= RUMBLE_EVERY {
+            rumble.resend_all();
+            last_rumble = Instant::now();
         }
     }
 }
@@ -277,6 +442,14 @@ fn neutral(pad: u8, s: &mut Slot) {
     if let Err(e) = s.out.send(&s.last) {
         eprintln!("xidpipe: pad {pad}: {e}");
     }
+}
+
+/// PC -> Xbox: magic | version | type | poll ms (0 = auto) | 0 | ping u32 (echoed in a pong)
+fn hello_packet(poll_ms: u8, ping: u32) -> [u8; 10] {
+    let p = ping.to_le_bytes();
+    [
+        MAGIC[0], MAGIC[1], VERSION, MSG_HELLO, poll_ms, 0, p[0], p[1], p[2], p[3],
+    ]
 }
 
 /// PC -> Xbox: magic | version | type | pad | left motor u16 | right motor u16
@@ -299,29 +472,54 @@ enum Msg<'a> {
     Unplugged {
         pad: u8,
     },
+    Pong {
+        ping: u32,
+    },
+    Info {
+        pad: u8,
+        info: XboxInfo,
+    },
 }
 
-/// Packet layout (little-endian), see README "Protocol":
-/// magic "XP" | version | type | pad | report len | vid u16 | pid u16 | seq u32 | report
+/// Xbox -> PC packets (little-endian), see README "Protocol".
 fn decode(b: &[u8]) -> Option<Msg<'_>> {
-    if b.len() < HEADER || &b[..2] != MAGIC || b[2] != VERSION {
-        return None;
-    }
-    let pad = b[4];
-    let len = b[5] as usize;
-    if pad == 0 || pad > MAX_PADS || len > 32 || b.len() < HEADER + len {
+    if b.len() < 4 || &b[..2] != MAGIC || b[2] != VERSION {
         return None;
     }
     let u16_at = |i: usize| u16::from_le_bytes([b[i], b[i + 1]]);
+    let u32_at = |i: usize| u32::from_le_bytes(b[i..i + 4].try_into().unwrap());
     match b[3] {
-        MSG_STATE => Some(Msg::State {
-            pad,
-            vid: u16_at(6),
-            pid: u16_at(8),
-            seq: u32::from_le_bytes(b[10..14].try_into().unwrap()),
-            report: &b[HEADER..HEADER + len],
+        MSG_PONG if b.len() >= 10 => Some(Msg::Pong { ping: u32_at(6) }),
+        MSG_INFO if b.len() >= 14 && (1..=MAX_PADS).contains(&b[4]) => Some(Msg::Info {
+            pad: b[4],
+            info: XboxInfo {
+                dev_interval: b[5],
+                interval: b[6],
+                xid: (b[7], b[8]),
+                has_rumble: b[9] != 0,
+                reports_per_s: u16_at(10),
+                usb_errors: u16_at(12),
+            },
         }),
-        MSG_UNPLUGGED => Some(Msg::Unplugged { pad }),
+        MSG_STATE | MSG_UNPLUGGED => {
+            // magic "XP" | version | type | pad | report len | vid u16 | pid u16 | seq u32 | report
+            let (pad, len) = (b[4], *b.get(5)? as usize);
+            if b.len() < HEADER || pad == 0 || pad > MAX_PADS || len > 32 || b.len() < HEADER + len
+            {
+                return None;
+            }
+            Some(if b[3] == MSG_STATE {
+                Msg::State {
+                    pad,
+                    vid: u16_at(6),
+                    pid: u16_at(8),
+                    seq: u32_at(10),
+                    report: &b[HEADER..HEADER + len],
+                }
+            } else {
+                Msg::Unplugged { pad }
+            })
+        }
         _ => None,
     }
 }
@@ -354,13 +552,46 @@ mod tests {
         p[3] = MSG_UNPLUGGED;
         assert_eq!(decode(&p), Some(Msg::Unplugged { pad: 2 }));
         assert_eq!(decode(b"XP\x02\x01"), None);
+        assert_eq!(decode(b"XP\x01\x01\x01"), None); // truncated header
+        assert_eq!(
+            decode(&[b'X', b'P', 1, MSG_PONG, 0, 0, 1, 2, 3, 4]),
+            Some(Msg::Pong { ping: 0x04030201 })
+        );
+        let info = [b'X', b'P', 1, MSG_INFO, 3, 8, 4, 1, 2, 1, 250, 0, 7, 0];
+        assert_eq!(
+            decode(&info),
+            Some(Msg::Info {
+                pad: 3,
+                info: XboxInfo {
+                    dev_interval: 8,
+                    interval: 4,
+                    xid: (1, 2),
+                    has_rumble: true,
+                    reports_per_s: 250,
+                    usb_errors: 7
+                }
+            })
+        );
+        assert_eq!(decode(&info[..13]), None);
     }
 
     #[test]
-    fn encodes_rumble() {
+    fn encodes_packets() {
         assert_eq!(
             rumble_packet(3, (0x1234, 0xffff)),
             [b'X', b'P', VERSION, MSG_RUMBLE, 3, 0x34, 0x12, 0xff, 0xff]
+        );
+        assert_eq!(
+            hello_packet(4, 0x0a0b0c0d),
+            [b'X', b'P', VERSION, MSG_HELLO, 4, 0, 0x0d, 0x0c, 0x0b, 0x0a]
+        );
+    }
+
+    #[test]
+    fn poll_rates() {
+        assert_eq!(
+            [0, 125, 250, 500, 1000, 300, 60, 5000].map(poll_ms),
+            [0, 8, 4, 2, 1, 2, 8, 1]
         );
     }
 }
