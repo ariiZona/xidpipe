@@ -228,22 +228,23 @@ impl App {
         }
         if self.preset.backend == Backend::Vjoy {
             ui.add(
-                egui::Slider::new(&mut self.preset.vjoy_device, 1..=16).text("first vJoy device"),
+                egui::Slider::new(&mut self.preset.vjoy_device, 1..=16)
+                    .text("vJoy device for pad 1"),
             );
             ui.label(
-                RichText::new(if self.preset.pressure {
-                    "Each pad uses 2 vJoy devices: the pad, then 6 pressure axes (A B X Y Black White)."
-                } else {
-                    "Each pad uses 1 vJoy device (pad 1 = first, pad 2 = next, ...)."
-                })
+                RichText::new(
+                    "One vJoy device per pad (pad 2 uses the next one). Its 8 axes: sticks, \
+                     LT/RT on Z/Rz, sl0/sl1 on Slider/Dial. To give pressure buttons their own \
+                     axes, map them to lt, rt, sl0 or sl1 below.",
+                )
                 .small(),
             );
         }
         ui.checkbox(&mut self.preset.pressure, "Pressure-sensitive face buttons");
         ui.label(
             RichText::new(
-                "A B X Y Black White send how hard they're pressed when mapped to LT/RT \
-                 (and on vJoy's pressure axes).",
+                "A B X Y Black White send how hard they're pressed when mapped to an analog \
+                 output (lt, rt, and on vJoy also sl0, sl1).",
             )
             .small(),
         );
@@ -288,7 +289,12 @@ impl App {
             .striped(true)
             .show(ui, |ui| {
                 for (name, axis, default) in pad::outputs() {
-                    ui.label(name);
+                    if name.starts_with("sl") {
+                        ui.label(name)
+                            .on_hover_text("Extra axis, vJoy only (Slider / Dial)");
+                    } else {
+                        ui.label(name);
+                    }
                     let current = self
                         .preset
                         .map
@@ -434,7 +440,7 @@ fn backend_label(b: Backend) -> &'static str {
         Backend::Xinput => "XInput (Xbox 360 controller)",
         Backend::Dinput if cfg!(windows) => "DirectInput (DualShock 4)",
         Backend::Dinput => "Generic gamepad (not XInput)",
-        Backend::Vjoy => "vJoy (DirectInput, pressure axes)",
+        Backend::Vjoy => "vJoy (DirectInput, extra axes)",
         Backend::None => "None (view only)",
     }
 }

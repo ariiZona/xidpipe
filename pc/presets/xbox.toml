@@ -4,10 +4,11 @@
 # Which controller the PC sees:
 #   "xinput" - Xbox 360 controller (Windows: ViGEmBus, Linux: uinput)
 #   "dinput" - Windows: DualShock 4 via ViGEmBus; Linux: generic (non-XInput) uinput pad
+#   "vjoy"   - Windows: vJoy DirectInput device, with two extra axes (sl0, sl1)
 #   "none"   - no virtual controller (use with --monitor)
 backend = "xinput"
 
-# true: A B X Y Black White send their pressure (0-255) when mapped to lt/rt.
+# true: A B X Y Black White send their pressure (0-255) when mapped to lt/rt/sl0/sl1.
 # false: they are plain on/off buttons everywhere.
 pressure = false
 
@@ -24,8 +25,12 @@ analog_deadzone = 30
 left_stick_deadzone = 7849
 right_stick_deadzone = 8689
 
+# vJoy only: device used by pad 1 (pad 2 uses the next one, and so on).
+vjoy_device = 1
+
 # output = "input". Unlisted outputs keep these defaults.
 # Outputs: a b x y lb rb back start ls rs up down left right guide lt rt lx ly rx ry
+#          sl0 sl1 (vJoy Slider/Dial axes)
 # Inputs:  a b x y black white lt rt up down left right start back ls rs lx ly rx ry none
 # Sticks only map to sticks; buttons and triggers map to each other freely.
 [map]

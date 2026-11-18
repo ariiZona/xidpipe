@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! vJoy backend (Windows, DirectInput).
 //!
-//! Pad N gets vJoy device `vjoy_device + (N-1)`: sticks on X/Y and RX/RY, triggers on Z/RZ,
-//! 11 buttons, d-pad on POV 1. vJoy allows only 8 axes per device, so with `pressure` on each
-//! pad takes two devices (stride 2) and the second one carries A B X Y Black White pressure on
-//! X Y Z RX RY RZ.
+//! Pad N gets one vJoy device, `vjoy_device + (N-1)`, so emulators see one device per pad.
+//! Axes: X/Y and RX/RY = sticks, Z/RZ = lt/rt, Slider/Dial = sl0/sl1, 11 buttons, d-pad on POV 1.
+//! DirectInput has 8 axes per device, so up to 4 pressure buttons get their own axis: map them
+//! to lt/rt/sl0/sl1.
 
 use crate::output::Output;
 use crate::pad::{Out, Profile};
@@ -95,26 +95,14 @@ fn pad_pos(o: &Out, pov: Pov) -> Pos {
         rx: axis(rx),
         ry: axis(ry.saturating_neg()),
         rz: axis8(o.rt),
+        slider: axis8(o.sliders[0]),
+        dial: axis8(o.sliders[1]),
         buttons: BUTTONS
             .iter()
             .enumerate()
             .filter(|b| o.buttons & b.1 != 0)
             .fold(0, |acc, b| acc | 1 << b.0),
         hats: [pov_value, u32::MAX, u32::MAX, u32::MAX],
-        ..Pos::default()
-    }
-}
-
-fn pressure_pos(p: &[u8; 6]) -> Pos {
-    let a = p.map(axis8);
-    Pos {
-        x: a[0],
-        y: a[1],
-        z: a[2],
-        rx: a[3],
-        ry: a[4],
-        rz: a[5],
-        hats: [u32::MAX; 4],
         ..Pos::default()
     }
 }
@@ -238,6 +226,8 @@ impl Dev {
             (0x33, "RX"),
             (0x34, "RY"),
             (0x35, "RZ"),
+            (0x36, "Slider"),
+            (0x37, "Dial"),
         ]
         .into_iter()
         .filter(|a| unsafe { (self.api.axis_exists)(self.id, a.0) } == 0)
@@ -255,8 +245,7 @@ impl Drop for Dev {
 }
 
 struct VJoy {
-    pad: Dev,
-    pressure: Option<Dev>,
+    dev: Dev,
     pov: Pov,
 }
 
@@ -265,72 +254,46 @@ pub fn open(p: &Profile, pad: u8) -> Result<Box<dyn Output>, String> {
     if unsafe { (api.enabled)() } == 0 {
         return Err("vJoy is installed but disabled; enable it in \"Configure vJoy\"".into());
     }
-    let stride = if p.pressure { 2 } else { 1 };
-    let first = p.vjoy_device as u32 + (pad as u32 - 1) * stride;
-    let last = first + stride - 1;
-    if last > 16 {
+    let id = p.vjoy_device as u32 + pad as u32 - 1;
+    if id > 16 {
         return Err(format!(
-            "pad {pad} needs vJoy device {last}, but vJoy has 16 at most"
+            "pad {pad} needs vJoy device {id}, but vJoy has 16 at most"
         ));
     }
-    let dev = Dev::acquire(api, first)?;
-    let pressure = if p.pressure {
-        Some(Dev::acquire(api, first + 1)?)
-    } else {
-        None
-    };
+    let mut dev = Dev::acquire(api, id)?;
 
     // Report setup problems once instead of failing: the pad still works with what exists.
-    let warn = |m: String| eprintln!("xidpipe: vJoy device {first}: {m}");
+    let warn = |m: String| eprintln!("xidpipe: vJoy device {id}: {m}");
     let missing = dev.missing_axes();
     if !missing.is_empty() {
-        warn(format!("missing axes {missing:?}"));
+        warn(format!(
+            "missing axes {missing:?}; outputs mapped there won't reach games"
+        ));
     }
-    let buttons = unsafe { (api.buttons)(first) };
+    let buttons = unsafe { (api.buttons)(id) };
     if buttons < BUTTONS.len() as i32 {
         warn(format!(
             "has {buttons} buttons, xidpipe uses {}",
             BUTTONS.len()
         ));
     }
-    let pov = if unsafe { (api.cont_povs)(first) } > 0 {
+    let pov = if unsafe { (api.cont_povs)(id) } > 0 {
         Pov::Continuous
-    } else if unsafe { (api.disc_povs)(first) } > 0 {
+    } else if unsafe { (api.disc_povs)(id) } > 0 {
         Pov::Discrete
     } else {
         warn("has no POV hat, so the d-pad won't work".into());
         Pov::Missing
     };
-    if let Some(d) = &pressure {
-        let missing = d.missing_axes();
-        if !missing.is_empty() {
-            eprintln!(
-                "xidpipe: vJoy pressure device {}: missing axes {missing:?}",
-                d.id
-            );
-        }
-    }
-    let mut v = VJoy {
-        pad: dev,
-        pressure,
-        pov,
-    };
-    v.pad.neutral = pad_pos(&Out::default(), pov);
-    if let Some(d) = &mut v.pressure {
-        d.neutral = pressure_pos(&[0; 6]);
-    }
-    Ok(Box::new(v))
+    dev.neutral = pad_pos(&Out::default(), pov);
+    Ok(Box::new(VJoy { dev, pov }))
 }
 
 // shortcut: no rumble for vJoy; its force feedback is DirectInput effects (FfbRegisterGenCB),
 // which would need an effect-to-motor translation. Add it if a game needs vJoy + rumble.
 impl Output for VJoy {
     fn send(&mut self, o: &Out) -> Result<(), String> {
-        self.pad.update(pad_pos(o, self.pov))?;
-        if let Some(d) = &self.pressure {
-            d.update(pressure_pos(&o.pressure))?;
-        }
-        Ok(())
+        self.dev.update(pad_pos(o, self.pov))
     }
 }
 
@@ -352,6 +315,7 @@ mod tests {
         let o = Out {
             buttons: 0x1000 | 0x0400 | 0x0001 | 0x0008,
             lt: 255,
+            sliders: [255, 128],
             sticks: [32767, 32767, -32768, 0],
             ..Out::default()
         };
@@ -364,7 +328,6 @@ mod tests {
         assert_eq!(p.hats[0], 4500);
         assert_eq!(pad_pos(&o, Pov::Discrete).hats[0], 0xFFFF_FFF0); // NE -> N
         assert_eq!(pad_pos(&Out::default(), Pov::Discrete).hats[0], u32::MAX);
-        let pp = pressure_pos(&[255, 0, 0, 0, 0, 128]);
-        assert_eq!((pp.x, pp.rz), (32767, 16447));
+        assert_eq!((p.slider, p.dial), (32767, 16447));
     }
 }

@@ -37,9 +37,8 @@ pub struct Out {
     pub rt: u8,
     /// lx, ly, rx, ry (+Y up)
     pub sticks: [i16; 4],
-    /// A B X Y Black White pressure after the analog deadzone; all 0 unless `pressure` is on.
-    /// Only backends with spare axes (vJoy) use it.
-    pub pressure: [u8; 6],
+    /// Extra analog outputs sl0, sl1 (0-255). Only vJoy has axes for them (Slider, Dial).
+    pub sliders: [u8; 2],
 }
 
 #[derive(Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Debug)]
@@ -152,6 +151,8 @@ const TARGETS: &[(&str, Target, &str)] = &[
     ("guide", Target::Button(0x0400), "none"),
     ("lt", Target::Trigger(0), "lt"),
     ("rt", Target::Trigger(1), "rt"),
+    ("sl0", Target::Trigger(2), "none"),
+    ("sl1", Target::Trigger(3), "none"),
     ("lx", Target::Axis(0), "lx"),
     ("ly", Target::Axis(1), "ly"),
     ("rx", Target::Axis(2), "rx"),
@@ -178,7 +179,7 @@ pub fn outputs() -> impl Iterator<Item = (&'static str, bool, &'static str)> {
 pub struct Profile {
     pub backend: Backend,
     pub vjoy_device: u8,
-    pub pressure: bool,
+    pressure: bool,
     press: u8,
     analog_dz: u8,
     stick_dz: [u16; 2],
@@ -234,16 +235,17 @@ impl Profile {
         let (rx, ry) = stick(x.sticks[2], x.sticks[3], self.stick_dz[1]);
         let sticks = [lx, ly, rx, ry];
         let mut o = Out::default();
-        if self.pressure {
-            o.pressure = std::array::from_fn(|i| dz8(x.analog[i], self.analog_dz));
-        }
         for &(t, s) in &self.map {
             match t {
                 Target::Button(bit) if self.pressed(x, s) => o.buttons |= bit,
                 Target::Button(_) => {}
                 Target::Trigger(i) => {
                     let v = self.level(x, s);
-                    if i == 0 { o.lt = v } else { o.rt = v }
+                    match i {
+                        0 => o.lt = v,
+                        1 => o.rt = v,
+                        _ => o.sliders[i - 2] = v,
+                    }
                 }
                 Target::Axis(i) => o.sticks[i] = if let Src::Axis(j) = s { sticks[j] } else { 0 },
             }
@@ -385,8 +387,12 @@ mod tests {
         assert_eq!(on.apply(&x).rt, 128);
         assert_eq!(off.apply(&x).rt, 255);
         assert_eq!(on.apply(&x).buttons & 0x1000, 0x1000); // still a digital A too
-        assert_eq!(on.apply(&x).pressure, [128, 0, 0, 0, 0, 0]);
-        assert_eq!(off.apply(&x).pressure, [0; 6]);
+        let on_slider = preset(
+            "pressure = true
+analog_deadzone = 0
+map = { sl1 = \"a\" }",
+        );
+        assert_eq!(on_slider.apply(&x).sliders, [0, 128]);
     }
 
     #[test]

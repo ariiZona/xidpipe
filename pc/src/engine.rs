@@ -68,12 +68,8 @@ struct Slot {
 }
 
 /// Changing any of these needs new virtual controllers; everything else applies live.
-fn output_key(p: &Profile) -> (Backend, u8, bool) {
-    (
-        p.backend,
-        p.vjoy_device,
-        p.backend == Backend::Vjoy && p.pressure,
-    )
+fn output_key(p: &Profile) -> (Backend, u8) {
+    (p.backend, p.vjoy_device)
 }
 
 /// Runs until the process ends. `updates` swaps settings live; `status` (GUI) gets live state.

@@ -12,7 +12,7 @@ OG controller --USB--> Xbox (xbox/, nxdk homebrew) --UDP, LAN--> PC (pc/, Rust) 
 - **3rd-party controllers:** any device with an XID interface (class 0x58) works, including pads that don't
   answer the XID descriptor request (nxdk's stock driver drops those). Short reports are zero-padded.
 - **Controller API is your choice:** `xinput` (Xbox 360 pad), `dinput` (DualShock 4 on Windows,
-  generic pad on Linux) or `vjoy` (Windows DirectInput via vJoy, with all six face-button pressures as axes).
+  generic pad on Linux) or `vjoy` (Windows DirectInput via vJoy, with two extra axes for pressure buttons).
 - **Pressure-sensitive face buttons:** A B X Y Black White can drive analog outputs (e.g. A as an analog accelerator on RT).
 - **Rumble:** games' rumble goes back to the controller's motors.
 - **Deadzones:** built-in `xbox` (Xbox defaults) and `zero` (no deadzone) presets, or set your own.
@@ -65,10 +65,11 @@ cargo build --release      # -> pc/target/release/xidpipe(.exe)
   Allow xidpipe through the firewall the first time it runs (private network).
   Build with the MSVC Rust toolchain (needs Visual Studio Build Tools). The GNU toolchain needs a full MinGW-w64
   install (`dlltool` and `as`), because the window's Windows dependencies build import libraries.
-- **vJoy (optional, Windows):** install [vJoy](https://github.com/BrunnerInnovation/vJoy/releases), then in "Configure vJoy" enable
-  device 1 with axes X Y Z Rx Ry Rz, at least 11 buttons and 1 POV hat (continuous gives diagonals).
-  With pressure on, also enable device 2 with axes X Y Z Rx Ry Rz: they carry A B X Y Black White pressure.
-  Each further pad uses the next device (or the next two with pressure on).
+- **vJoy (optional, Windows):** install [vJoy](https://github.com/BrunnerInnovation/vJoy/releases). In "Configure vJoy",
+  give device 1 all 8 axes, at least 11 buttons and 1 continuous POV hat (continuous gives diagonals).
+  Each pad is one vJoy device: pad 2 uses device 2, and so on. Sticks go on X/Y and Rx/Ry, LT/RT on Z/Rz,
+  and `sl0`/`sl1` on Slider/Dial. DirectInput allows 8 axes per device, so at most 4 pressure buttons can
+  have their own axis: map them to `lt`, `rt`, `sl0` or `sl1` (e.g. `sl0 = "a"`, `sl1 = "b"`).
 - **Linux:** xidpipe needs write access to `/dev/uinput`. Either run it as root or add a udev rule:
   ```sh
   echo 'KERNEL=="uinput", MODE="0660", GROUP="input", OPTIONS+="static_node=uinput"' | sudo tee /etc/udev/rules.d/60-xidpipe-uinput.rules
@@ -107,12 +108,12 @@ Saved presets live in `%APPDATA%\xidpipe\presets` (Windows), `~/.config/xidpipe/
 | setting | meaning |
 |---|---|
 | `backend` | `xinput`, `dinput`, `vjoy` (Windows) or `none` |
-| `vjoy_device` | first vJoy device (1-16) when `backend = "vjoy"` |
-| `pressure` | `true`: face buttons send their pressure when mapped to `lt`/`rt` (and on vJoy's pressure device). `false`: they're plain on/off buttons |
+| `vjoy_device` | vJoy device (1-16) for pad 1 when `backend = "vjoy"`. Pad 2 uses the next one |
+| `pressure` | `true`: face buttons send their pressure when mapped to an analog output (`lt`, `rt`, and on vJoy `sl0`, `sl1`). `false`: they're plain on/off buttons |
 | `press_threshold` | pressure (0-255) at which an analog button counts as pressed (default 30, from the original Xbox SDK) |
 | `analog_deadzone` | deadzone for analog buttons and triggers when they drive an analog output (0-255) |
 | `left_stick_deadzone`, `right_stick_deadzone` | radial stick deadzone (0-32000). The `xbox` preset uses XInput's 7849 / 8689 |
-| `[map]` | `output = "input"`, e.g. `rt = "a"`, `lb = "black"`, `lx = "rx"` to swap sticks |
+| `[map]` | `output = "input"`, e.g. `rt = "a"`, `lb = "black"`, `lx = "rx"` to swap sticks, `sl0 = "x"` (vJoy) |
 
 Most games apply their own deadzone on top of xidpipe's. Use `zero` if you want the game's deadzone alone.
 
