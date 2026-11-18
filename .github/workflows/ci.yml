@@ -22,7 +22,7 @@ jobs:
       run:
         working-directory: pc
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -34,7 +34,7 @@ jobs:
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
       - run: cargo build --locked --release
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: xidpipe-${{ runner.os }}
           path: |
@@ -46,7 +46,7 @@ jobs:
     name: Xbox app
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
       - name: Install nxdk prerequisites
@@ -56,7 +56,7 @@ jobs:
       - name: Build
         working-directory: xbox
         run: nxdk/bin/activate make -j"$(nproc)"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: xidpipe-xbox
           path: |
@@ -74,12 +74,12 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Check the tag matches the version in pc/Cargo.toml
         run: |
           version=$(grep -m1 '^version' pc/Cargo.toml | cut -d'"' -f2)
           test "v$version" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME but Cargo.toml says $version"; exit 1; }
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
       - name: Package

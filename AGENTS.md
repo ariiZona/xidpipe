@@ -34,6 +34,7 @@ Two programs that talk over UDP:
 | `pc/src/vjoy.rs` | vJoy backend (Windows), loaded from `vJoyInterface.dll` at run time |
 | `pc/src/gui.rs` | the window: Setup, Button tester, Debug tabs |
 | `pc/src/main.rs` | CLI, preset files on disk |
+| `pc/build.rs` | Windows version resource for `xidpipe.exe` (fixed public values only) |
 | `pc/presets/*.toml` | built-in presets (`xbox` documents every setting) |
 | `.github/workflows/ci.yml` | CI on `v*` tags (which also publish the GitHub release), pull requests, or by hand ("Run workflow") |
 

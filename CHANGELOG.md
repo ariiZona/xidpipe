@@ -2,6 +2,15 @@
 
 Each release's notes on GitHub are taken from its section here.
 
+## v0.2.4
+
+- Windows: `xidpipe.exe` now carries version information (name, version, description, licence) in
+  Properties > Details, like other Windows programs. Antivirus heuristics tend to distrust executables
+  without it; this may help with false positives such as Defender's `Trojan:Win32/Bearfoos.B!m`, but
+  that is not confirmed. If Defender flags xidpipe, please report it as a false positive at
+  https://www.microsoft.com/en-us/wdsi/filesubmission.
+- CI: updated `actions/checkout`, `upload-artifact` and `download-artifact` to their Node 24 versions.
+
 ## v0.2.3
 
 Not tested on hardware: CI builds and unit tests only.
