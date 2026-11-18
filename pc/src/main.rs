@@ -26,6 +26,7 @@ usage:
   xidpipe PRESET [--xbox IP] [--poll HZ] [--monitor]   run without a window
   xidpipe save NAME [FROM]                    copy preset FROM (default: xbox) to NAME for editing
   xidpipe list                                list presets
+  xidpipe --version                           show the version
 
 PRESET is a built-in name (xbox, zero), a saved preset name, or a path to a .toml file.
 --xbox IP   talk to this Xbox directly instead of finding it by broadcast
@@ -69,6 +70,10 @@ fn run(args: Vec<String>) -> Result<(), String> {
                 poll_hz = hz.parse().map_err(|_| format!("bad polling rate '{hz}'"))?;
             }
             "-h" | "--help" => return Err(USAGE.into()),
+            "-V" | "--version" => {
+                println!("xidpipe {}", env!("CARGO_PKG_VERSION"));
+                return Ok(());
+            }
             s if s.starts_with('-') => return Err(format!("unknown option '{s}'\n{USAGE}")),
             s => preset = s.to_string(),
         }

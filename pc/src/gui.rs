@@ -89,7 +89,7 @@ pub fn run() -> Result<(), String> {
     };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("xidpipe")
+            .with_title(concat!("xidpipe ", env!("CARGO_PKG_VERSION")))
             .with_inner_size([960.0, 680.0]),
         ..Default::default()
     };

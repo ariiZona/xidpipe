@@ -57,3 +57,43 @@ jobs:
             xbox/bin/default.xbe
             xbox/xidpipe.iso
           if-no-files-found: error
+
+  # Pushing a tag like v0.1.0 publishes a GitHub release with the builds above attached and
+  # the matching CHANGELOG.md section as notes. GitHub only: Forgejo skips this job.
+  release:
+    name: Release
+    if: startsWith(github.ref, 'refs/tags/v') && github.server_url == 'https://github.com'
+    needs: [pc, xbox]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the tag matches the version in pc/Cargo.toml
+        run: |
+          version=$(grep -m1 '^version' pc/Cargo.toml | cut -d'"' -f2)
+          test "v$version" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME but Cargo.toml says $version"; exit 1; }
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Package
+        run: |
+          v="$GITHUB_REF_NAME"
+          mkdir out
+          cp README.md LICENSE dist/xidpipe-Windows/
+          (cd dist/xidpipe-Windows && zip -9 "../../out/xidpipe-$v-windows-x64.zip" xidpipe.exe README.md LICENSE)
+          for os in Linux:linux-x64 macOS:macos-arm64; do
+            src="dist/xidpipe-${os%%:*}"
+            cp README.md LICENSE "$src/" && chmod +x "$src/xidpipe"
+            tar -C "$src" -czf "out/xidpipe-$v-${os##*:}.tar.gz" xidpipe README.md LICENSE
+          done
+          (cd dist/xidpipe-xbox && zip -9 -j "../../out/xidpipe-$v-xbox.zip" bin/default.xbe xidpipe.iso)
+          ls -l out
+      - name: Release notes from CHANGELOG.md
+        run: |
+          awk -v h="## $GITHUB_REF_NAME" '$0 == h {f = 1; next} /^## / {f = 0} f' CHANGELOG.md > notes.md
+          test -s notes.md || { echo "CHANGELOG.md has no '## $GITHUB_REF_NAME' section"; exit 1; }
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" out/* --title "xidpipe $GITHUB_REF_NAME" --notes-file notes.md
