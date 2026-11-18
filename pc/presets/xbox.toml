@@ -28,6 +28,9 @@ right_stick_deadzone = 8689
 # vJoy only: device used by pad 1 (pad 2 uses the next one, and so on).
 vjoy_device = 1
 
+# Vibration strength, 0-100 %. Scales both motors, so it is also the maximum. 0 turns rumble off.
+rumble_strength = 100
+
 # output = "input". Unlisted outputs keep these defaults.
 # Outputs: a b x y lb rb back start ls rs up down left right guide lt rt lx ly rx ry
 #          sl0 sl1 (vJoy Slider/Dial axes)

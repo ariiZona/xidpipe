@@ -70,6 +70,8 @@ pub struct Preset {
     pub right_stick_deadzone: u16,
     /// First vJoy device to use (backend = "vjoy")
     pub vjoy_device: u8,
+    /// Vibration strength in percent: scales both motors, so it is also the maximum (0 = off)
+    pub rumble_strength: u8,
     pub map: BTreeMap<String, String>,
 }
 
@@ -84,6 +86,7 @@ impl Default for Preset {
             left_stick_deadzone: 7849,
             right_stick_deadzone: 8689,
             vjoy_device: 1,
+            rumble_strength: 100,
             map: BTreeMap::new(),
         }
     }
@@ -179,6 +182,7 @@ pub fn outputs() -> impl Iterator<Item = (&'static str, bool, &'static str)> {
 pub struct Profile {
     pub backend: Backend,
     pub vjoy_device: u8,
+    pub rumble_strength: u8,
     pressure: bool,
     press: u8,
     analog_dz: u8,
@@ -195,6 +199,12 @@ impl Profile {
             if dz > 32000 {
                 return Err(format!("{k}_stick_deadzone must be 0..=32000, got {dz}"));
             }
+        }
+        if p.rumble_strength > 100 {
+            return Err(format!(
+                "rumble_strength must be 0..=100, got {}",
+                p.rumble_strength
+            ));
         }
         if !(1..=16).contains(&p.vjoy_device) {
             return Err(format!("vjoy_device must be 1..=16, got {}", p.vjoy_device));
@@ -222,6 +232,7 @@ impl Profile {
         Ok(Profile {
             backend: p.backend,
             vjoy_device: p.vjoy_device,
+            rumble_strength: p.rumble_strength,
             pressure: p.pressure,
             press: p.press_threshold,
             analog_dz: p.analog_deadzone,
@@ -405,6 +416,7 @@ map = { sl1 = \"a\" }",
         let back: Preset = toml::from_str(&toml::to_string(&p).unwrap()).unwrap();
         assert_eq!(back, p);
         assert!(Profile::new(&toml::from_str("vjoy_device = 0").unwrap()).is_err());
+        assert!(Profile::new(&toml::from_str("rumble_strength = 101").unwrap()).is_err());
     }
 
     #[test]

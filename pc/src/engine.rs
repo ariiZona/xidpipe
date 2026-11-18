@@ -8,6 +8,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::ErrorKind;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -99,7 +100,9 @@ pub struct Status {
 pub struct Rumble {
     sock: UdpSocket,
     xbox: Mutex<Option<IpAddr>>,
+    /// What the game asked for, per pad; the strength setting is applied when sending.
     levels: Mutex<BTreeMap<u8, (u16, u16)>>,
+    strength: AtomicU8,
 }
 
 impl Rumble {
@@ -110,6 +113,7 @@ impl Rumble {
 
     fn send(&self, pad: u8, level: (u16, u16)) {
         if let Some(ip) = *self.xbox.lock().unwrap() {
+            let level = scale_rumble(level, self.strength.load(Ordering::Relaxed));
             let _ = self
                 .sock
                 .send_to(&rumble_packet(pad, level), (ip, XBOX_PORT));
@@ -123,14 +127,23 @@ impl Rumble {
         }
     }
 
+    /// What the motors get now, after the strength setting.
     fn level(&self, pad: u8) -> (u16, u16) {
-        self.levels
+        let level = self
+            .levels
             .lock()
             .unwrap()
             .get(&pad)
             .copied()
-            .unwrap_or_default()
+            .unwrap_or_default();
+        scale_rumble(level, self.strength.load(Ordering::Relaxed))
     }
+}
+
+/// Vibration strength: `percent` of each motor's level, so 100 leaves it unchanged and 0 turns it off.
+fn scale_rumble((l, r): (u16, u16), percent: u8) -> (u16, u16) {
+    let f = |v: u16| (v as u32 * percent.min(100) as u32 / 100) as u16;
+    (f(l), f(r))
 }
 
 struct Slot {
@@ -182,6 +195,7 @@ pub fn run(
         sock: sock.try_clone().map_err(|e| e.to_string())?,
         xbox: Mutex::new(None),
         levels: Mutex::new(BTreeMap::new()),
+        strength: AtomicU8::new(settings.profile.rumble_strength),
     });
     let dest = |s: &Settings| {
         SocketAddr::new(s.xbox.unwrap_or(IpAddr::V4(Ipv4Addr::BROADCAST)), XBOX_PORT)
@@ -231,6 +245,10 @@ pub fn run(
                     }
                     if new.xbox != settings.xbox || new.poll_hz != settings.poll_hz {
                         last_hello = start - HELLO_EVERY; // tell the Xbox right away
+                    }
+                    let strength = new.profile.rumble_strength;
+                    if rumble.strength.swap(strength, Ordering::Relaxed) != strength {
+                        rumble.resend_all(); // a running rumble changes strength at once
                     }
                     settings = new;
                 }
@@ -585,6 +603,14 @@ mod tests {
             hello_packet(4, 0x0a0b0c0d),
             [b'X', b'P', VERSION, MSG_HELLO, 4, 0, 0x0d, 0x0c, 0x0b, 0x0a]
         );
+    }
+
+    #[test]
+    fn rumble_strength() {
+        assert_eq!(scale_rumble((65535, 1000), 100), (65535, 1000));
+        assert_eq!(scale_rumble((65535, 1000), 50), (32767, 500));
+        assert_eq!(scale_rumble((65535, 1000), 0), (0, 0));
+        assert_eq!(scale_rumble((65535, 65535), 200), (65535, 65535)); // clamped to 100%
     }
 
     #[test]

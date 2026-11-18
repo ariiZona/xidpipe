@@ -124,6 +124,7 @@ Saved presets live in `%APPDATA%\xidpipe\presets` (Windows), `~/.config/xidpipe/
 | setting | meaning |
 |---|---|
 | `backend` | `xinput`, `dinput`, `vjoy` (Windows) or `none` |
+| `rumble_strength` | vibration strength 0-100 % (default 100). Scales both motors, so it's also the maximum; 0 turns rumble off |
 | `vjoy_device` | vJoy device (1-16) for pad 1 when `backend = "vjoy"`. Pad 2 uses the next one |
 | `pressure` | `true`: face buttons send their pressure when mapped to an analog output (`lt`, `rt`, and on vJoy `sl0`, `sl1`). `false`: they're plain on/off buttons |
 | `press_threshold` | pressure (0-255) at which an analog button counts as pressed (default 30, from the original Xbox SDK) |

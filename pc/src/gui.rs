@@ -289,6 +289,15 @@ impl App {
                 .small(),
             );
         }
+        ui.add(
+            egui::Slider::new(&mut self.preset.rumble_strength, 0..=100)
+                .text("vibration strength")
+                .suffix("%"),
+        )
+        .on_hover_text(
+            "Scales both rumble motors, so it is also the maximum: 50% never shakes harder \
+             than half power. 0% turns rumble off. Try it with the Debug tab's test buttons.",
+        );
         ui.checkbox(&mut self.preset.pressure, "Pressure-sensitive face buttons");
         ui.label(
             RichText::new(
