@@ -1,0 +1,59 @@
+# Runs on GitHub Actions and on Forgejo/Gitea Actions (they read .github/workflows too).
+# On Forgejo, the Windows and macOS jobs need runners with those labels.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pc:
+    name: PC app (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: pc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: pc
+      - if: matrix.os == 'ubuntu-latest'
+        run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+      - run: cargo build --locked --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xidpipe-${{ runner.os }}
+          path: |
+            pc/target/release/xidpipe
+            pc/target/release/xidpipe.exe
+          if-no-files-found: error
+
+  xbox:
+    name: Xbox app
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install nxdk prerequisites
+        run: sudo apt-get update && sudo apt-get install -y clang lld llvm bison flex cmake make
+      - name: Build
+        working-directory: xbox
+        run: nxdk/bin/activate make -j"$(nproc)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xidpipe-xbox
+          path: |
+            xbox/bin/default.xbe
+            xbox/xidpipe.iso
+          if-no-files-found: error
