@@ -19,7 +19,10 @@ OG controller --USB--> Xbox (xbox/, nxdk homebrew) --UDP, LAN--> PC (pc/, Rust) 
 **Tested on real hardware so far:** one 3rd-party Pelican pad (reports itself as `ffff:ffff`, rejected by
 XBlast OS and Gentoox) on Windows, playing through xemu and xbased. The Xbox app's FTP server and update
 check (new in v0.2) work on that setup too: an update from GitHub installed itself, and an FTP upload of
-`default.xbe` installed and restarted xidpipe. Everything else is only built and unit-tested by CI.
+`default.xbe` installed and restarted xidpipe. The two-device PCSX2 preset was tested on Windows with simulated Xbox
+reports. PCSX2's SDL library saw all 256 pressure levels for A, B, X and Y, and both virtual pads released
+after input stopped. Testing with a physical pad in a PS2 game is still pending. Other setups have only
+build and unit-test coverage from CI.
 
 ## What you need
 
@@ -51,9 +54,11 @@ From then on the Xbox app keeps itself up to date (see [Updating the Xbox app](#
   answer the XID descriptor request (nxdk's stock driver drops those). Short reports are zero-padded.
   The DVD remote and the Steel Battalion controller are ignored.
 - **Choose what the PC sees:** `xinput` (Xbox 360 controller), `dinput` (DualShock 4 on Windows, a generic
-  non-XInput gamepad on Linux) or `vjoy` (a vJoy DirectInput device on Windows, with two extra axes).
+  non-XInput gamepad on Linux), `vjoy` (a vJoy DirectInput device on Windows, with two extra axes)
+  or `pressure` (two Xbox 360 pads for emulators).
 - **Pressure-sensitive buttons:** A B X Y Black White can drive analog outputs, for example A as an analog
-  accelerator on RT (see [Presets](#presets)).
+  accelerator on RT (see [Presets](#presets)). Optional PCSX2 profiles map all four PS2 face
+  buttons to analog inputs. [PCSX2 setup](#pressure-sensitive-buttons-in-pcsx2)
 - **Rumble:** the game's rumble goes back to the controller's motors. It's sent the moment the game sets it,
   with an adjustable maximum strength. See [Rumble support](#rumble-support) for which modes have it.
 - **Polling:** "auto" polls each controller at the rate it asks for, but never slower than 125 Hz.
@@ -71,11 +76,11 @@ From then on the Xbox app keeps itself up to date (see [Updating the Xbox app](#
   it with the controller, and xidpipe restarts into it.
 - **Built-in FTP server** on the Xbox, like a dashboard's: user `xbox`, password `xbox`, every drive.
   Copy files to and from the Xbox while xidpipe runs. Uploading a new `default.xbe` installs it and restarts.
-- **Several controllers:** each one gets its own virtual controller. Pads on the four front ports are
+- **Several controllers:** each one gets its own virtual controller (a pair in `pressure` mode). Pads on the four front ports are
   numbered 1–4 by port; other Xbox-protocol devices (for example behind an extra hub) get 5 and up.
   The Xbox app handles up to 8.
 
-**Default button mapping** (both built-in presets): A B X Y, Back, Start, d-pad, both sticks and their clicks,
+**Default button mapping** (`xbox` and `zero` presets): A B X Y, Back, Start, d-pad, both sticks and their clicks,
 and LT/RT map to the same Xbox 360 controls. **White → LB, Black → RB.** Guide isn't mapped, since the
 original pad has no such button.
 
@@ -91,7 +96,9 @@ original pad has no such button.
   `poll()`) sends it the moment the game asks. An lwIP callback on the Xbox wakes the main loop, and the
   controller's rumble endpoint is polled every 1 ms.
 - Once a pad has rumbled, its rumble state is resent every 250 ms. The Xbox stops the motors by itself after
-  1 s without rumble from the PC, so a lost packet or a crashed PC can't leave them running.
+  1 s without rumble from the PC, so a lost packet or a crashed PC can't leave them running. While the motors
+  are on, and after a failed write, the Xbox rewrites them to the pad every 250 ms, and aborts a write the pad
+  hasn't taken within 100 ms, so a lost or stuck "motors off" can't leave them running either.
 - The window only reads a copy of the live state. The network loop runs on its own thread and never waits for the window.
 - Each side finds the other again on its own: the PC says hello every second, and the Xbox sends to whichever PC spoke last.
   While searching, the PC sends the hello to the address where it last found the Xbox, to `255.255.255.255`,
@@ -329,15 +336,15 @@ The first build downloads and compiles the Rust dependencies, which takes a few 
 
 Saved presets live in `%APPDATA%\xidpipe\presets` (Windows) or `~/.config/xidpipe/presets` (Linux).
 The window's Save / Save as write them there, and so
-does `xidpipe save`. The built-in `xbox` and `zero` can't be overwritten.
+does `xidpipe save`. Use **Save as** to customize a built-in preset.
 [`pc/presets/xbox.toml`](pc/presets/xbox.toml) documents every setting:
 
 | setting | meaning |
 |---|---|
-| `backend` | `xinput`, `dinput`, `vjoy` (Windows) or `none` |
+| `backend` | `xinput`, `pressure` (Xbox 360 plus a second pad for button pressure), `dinput`, `vjoy` (Windows) or `none` |
 | `rumble_strength` | vibration strength 0-100 % (default 100). Scales both motors, so it's also the maximum; 0 turns rumble off |
 | `vjoy_device` | vJoy device (1-16) for pad 1 when `backend = "vjoy"`. Pad 2 uses the next one |
-| `pressure` | `true`: A B X Y Black White send their pressure when mapped to an analog output (`lt`, `rt`, `sl0`, `sl1`). `false`: they're plain on/off buttons |
+| `pressure` | Use the pressure of A B X Y Black White when mapped to `lt`, `rt`, `sl0` or `sl1`. The six axes on the `pressure` backend's second pad always carry pressure. |
 | `press_threshold` | pressure (0-255) at which an analog button counts as pressed (default 30, from the original Xbox SDK) |
 | `analog_deadzone` | deadzone for the 8 analog buttons (incl. LT/RT) when they drive an analog output (0-255) |
 | `left_stick_deadzone`, `right_stick_deadzone` | radial stick deadzone (0-32000). The `xbox` preset uses XInput's 7849 / 8689 |
@@ -356,12 +363,42 @@ rt = "a"
 a = "none"
 ```
 
+### Pressure-sensitive buttons in PCSX2
+
+The default `xbox` preset creates one Xbox 360 pad per physical controller. For PS2 games that read
+button pressure, open **Setup → Preset → Emulator presets** and choose a layout. Both keep the analog
+sticks and map A/B/X/Y to Cross/Circle/Square/Triangle.
+
+| xidpipe preset | Devices per Xbox pad | PS2 shoulder buttons and rumble | PCSX2 input profile |
+|---|---|---|---|
+| `pcsx2-vjoy` (Windows) | One vJoy device. Its eight axes carry the sticks and four face pressures. | Digital L1/R1 and L2/R2. No rumble. | [xidpipe-vjoy.ini](pcsx2/xidpipe-vjoy.ini) |
+| `pcsx2` (Windows or Linux) | Two Xbox 360 devices combined on PS2 port 1. Uses two Windows XInput slots. | Analog L1/R1 and L2/R2, with rumble on the main device. | [xidpipe-two-pads.ini](pcsx2/xidpipe-two-pads.ini) |
+
+1. For the one-device layout, open **Configure vJoy**, enable device 1 with **all eight axes, 32 buttons
+   and one continuous POV**, and apply. PCSX2 numbers the four d-pad directions after the configured
+   buttons, so the supplied profile uses buttons 32–35 (zero-based). Windows lists the configured
+   vJoy device while its driver is enabled, even when xidpipe is closed. [vJoy installation](#platforms)
+2. Select the xidpipe preset in the window or run `xidpipe pcsx2-vjoy` or `xidpipe pcsx2`.
+   Copy the matching `.ini` from the release's `pcsx2` folder to `inputprofiles` in PCSX2's data
+   directory. PCSX2's **Open Data Directory** command locates it, including for portable installs.
+3. In **Game Properties → Summary → Input Profile**, select the copied profile for the game.
+   The one-device profile uses `DInput-0`. If another controller has that number, enable **DInput**
+   in **Settings → Controllers → Global Settings**, look up vJoy's identifier and replace `DInput-0`
+   throughout the copied file with PCSX2 closed. The two-device profile assumes `SDL-0` for the
+   pad with Start and `SDL-1` for pressure. Adjust those two identifiers if your device order differs.
+
+To check pressure, slowly squeeze two buttons with different force in xidpipe's **Button tester**,
+then try **PS2 Pad Test** with the same game profile. Both readings should rise independently and
+return to zero on release. For a pad with noisy buttons, set xidpipe's **analog buttons** deadzone
+to the highest idle reading. Other emulators can use these presets if they support binding an axis
+to a pressure-sensitive button. [PCSX2's Pad Test instructions](https://pcsx2.net/docs/configuration/controllers/#testing-your-input-mapping)
+
 ## Rumble support
 
 | backend | rumble |
 |---|---|
-| `xinput` on Windows (ViGEm) | yes |
-| `xinput` / `dinput` on Linux (uinput force feedback) | yes |
+| `xinput` / `pressure` on Windows (ViGEm) | yes, on the main pad |
+| `xinput` / `pressure` / `dinput` on Linux (uinput force feedback) | yes, on the main pad |
 | `dinput` on Windows (DS4) | not yet: vigem-client doesn't expose the DS4 rumble request |
 | `vjoy` | not yet: vJoy rumble arrives as DirectInput force-feedback effects, which need translating |
 

@@ -2,6 +2,20 @@
 
 Each release's notes on GitHub are taken from its section here.
 
+## v0.2.5
+
+- Xbox: fixed rumble that could keep running until the controller was replugged, even after closing
+  xidpipe on the PC. A rumble write the pad never accepted blocked every later write, "motors off"
+  included. The Xbox now aborts a write the pad hasn't taken within 100 ms, and rewrites the motors
+  every 250 ms while they run or after a failed write.
+- PC: optional PCSX2 presets for the pressure-sensitive face buttons, under **Setup → Preset →
+  Emulator presets**. `pcsx2-vjoy` (Windows) uses one vJoy device. `pcsx2` uses a new `pressure`
+  backend: two Xbox 360 pads per controller, the second carrying A/B/X/Y/White/Black pressure.
+  Matching PCSX2 input profiles ship in the release's `pcsx2` folder. See the README's
+  "Pressure-sensitive buttons in PCSX2".
+- Tested on hardware: none of this yet. The rumble fix is built but untested on a console. The PCSX2
+  presets were tested with simulated Xbox reports only, not a physical pad in a PS2 game.
+
 ## v0.2.4
 
 - Windows: `xidpipe.exe` now carries version information (name, version, description, licence) in

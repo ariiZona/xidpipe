@@ -1,0 +1,14 @@
+# One Windows vJoy device. Use the matching PCSX2 input profile.
+backend = "vjoy"
+pressure = true
+analog_deadzone = 0
+
+[map]
+lt = "a"   # Z -> Cross
+rt = "b"   # Rz -> Circle
+sl0 = "x"  # Slider -> Square
+sl1 = "y"  # Dial -> Triangle
+a = "lt"   # button 1 -> L2
+b = "rt"   # button 2 -> R2
+x = "none"
+y = "none"

@@ -330,4 +330,25 @@ mod tests {
         assert_eq!(pad_pos(&Out::default(), Pov::Discrete).hats[0], u32::MAX);
         assert_eq!((p.slider, p.dial), (32767, 16447));
     }
+
+    #[test]
+    fn pcsx2_preset_sends_four_pressures_on_one_device() {
+        let preset = toml::from_str(include_str!("../presets/pcsx2-vjoy.toml")).unwrap();
+        let profile = Profile::new(&preset).unwrap();
+        assert_eq!(profile.backend, crate::pad::Backend::Vjoy);
+        let mut input = crate::pad::Xid {
+            analog: [1, 64, 128, 255, 0, 0, 0, 0],
+            ..Default::default()
+        };
+        let pos = pad_pos(&profile.apply(&input), Pov::Continuous);
+        assert_eq!(
+            [pos.z, pos.rz, pos.slider, pos.dial],
+            [1, 64, 128, 255].map(axis8)
+        );
+        assert_eq!(pos.buttons, 0);
+        input.analog = [0, 0, 0, 0, 255, 255, 255, 255];
+        let pos = pad_pos(&profile.apply(&input), Pov::Continuous);
+        assert_eq!([pos.z, pos.rz, pos.slider, pos.dial], [0; 4]);
+        assert_eq!(pos.buttons, 0b11_0011);
+    }
 }

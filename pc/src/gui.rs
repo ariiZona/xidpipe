@@ -263,6 +263,7 @@ impl App {
             let mut pick = None;
             egui::ComboBox::from_id_salt("preset")
                 .selected_text(&self.name)
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
                 .show_ui(ui, |ui| {
                     let names = crate::BUILTIN
                         .iter()
@@ -272,6 +273,16 @@ impl App {
                         if ui.selectable_label(n == self.name, &n).clicked() {
                             pick = Some(n);
                         }
+                    }
+                    ui.collapsing("Emulator presets", |ui| {
+                        for &(name, _) in crate::EMULATOR_PRESETS {
+                            if ui.selectable_label(name == self.name, name).clicked() {
+                                pick = Some(name.to_string());
+                            }
+                        }
+                    });
+                    if pick.is_some() {
+                        ui.close();
                     }
                 });
             if let Some(n) = pick {
@@ -310,11 +321,19 @@ impl App {
             .selected_text(backend_label(self.preset.backend))
             .show_ui(ui, |ui| {
                 for b in &available {
+                    if *b == Backend::Pressure && self.preset.backend != Backend::Pressure {
+                        continue; // the two-device mode is selected through Emulator presets
+                    }
                     ui.selectable_value(&mut self.preset.backend, *b, backend_label(*b));
                 }
             });
         if !available.contains(&self.preset.backend) {
             ui.colored_label(ERROR, "Not available on this OS. Pick another type.");
+        }
+        if self.preset.backend == Backend::Pressure {
+            ui.label("Use the xidpipe-two-pads input profile in PCSX2 for analog buttons, triggers and rumble.");
+        } else if self.name == "pcsx2-vjoy" && self.preset.backend == Backend::Vjoy {
+            ui.label("Use the xidpipe-vjoy input profile in PCSX2. One device carries both sticks, four pressure buttons and digital shoulder buttons.");
         }
         if self.preset.backend == Backend::Vjoy {
             ui.add(
@@ -339,7 +358,10 @@ impl App {
             "Scales both rumble motors, so it is also the maximum: 50% never shakes harder \
              than half power. 0% turns rumble off. Try it with the Debug tab's test buttons.",
         );
-        ui.checkbox(&mut self.preset.pressure, "Pressure-sensitive face buttons");
+        ui.checkbox(
+            &mut self.preset.pressure,
+            "Use face-button pressure on mapped triggers and sliders",
+        );
         ui.label(
             RichText::new(
                 "A B X Y Black White send how hard they're pressed when mapped to an analog \
@@ -543,6 +565,12 @@ impl App {
             v.out.lt,
             v.out.rt
         ));
+        if self.preset.backend == Backend::Pressure {
+            let [a, b, x, y, lb, rb] = v.out.face_pressure;
+            ui.label(format!(
+                "Pressure pad   A {a}   B {b}   X {x}   Y {y}   LB {lb}   RB {rb}"
+            ));
+        }
     }
 
     /// Button tester: the raw controller as the Xbox reads it, before deadzones and mapping.
@@ -985,6 +1013,7 @@ fn pad_drawing(ui: &mut Ui, x: &Xid) {
 fn backend_label(b: Backend) -> &'static str {
     match b {
         Backend::Xinput => "XInput (Xbox 360 controller)",
+        Backend::Pressure => "Xbox 360 + button pressure (two devices)",
         Backend::Dinput if cfg!(windows) => "DirectInput (DualShock 4)",
         Backend::Dinput => "Generic gamepad (not XInput)",
         Backend::Vjoy => "vJoy (DirectInput, extra axes)",

@@ -20,6 +20,12 @@ pub const BUILTIN: [(&str, &str); 2] = [
     ("zero", include_str!("../presets/zero.toml")),
 ];
 
+pub const EMULATOR_PRESETS: &[(&str, &str)] = &[
+    #[cfg(windows)]
+    ("pcsx2-vjoy", include_str!("../presets/pcsx2-vjoy.toml")),
+    ("pcsx2", include_str!("../presets/pcsx2.toml")),
+];
+
 const USAGE: &str = "\
 usage:
   xidpipe                                     open the window (presets, live view)
@@ -28,7 +34,7 @@ usage:
   xidpipe list                                list presets
   xidpipe --version                           show the version
 
-PRESET is a built-in name (xbox, zero), a saved preset name, or a path to a .toml file.
+PRESET is a name from 'xidpipe list' or a path to a .toml file.
 --xbox IP   talk to this Xbox directly instead of finding it by broadcast
 --poll HZ   poll the controllers at 125, 250, 500 or 1000 Hz (default: auto, the
             controller's own rate but at least 125 Hz)
@@ -159,11 +165,17 @@ fn preset_text(name: &str) -> Result<String, String> {
     {
         return fs::read_to_string(&f).map_err(|e| format!("{}: {e}", f.display()));
     }
+    builtin_text(name)
+        .map(str::to_owned)
+        .ok_or(format!("unknown preset '{name}' (see: xidpipe list)"))
+}
+
+fn builtin_text(name: &str) -> Option<&'static str> {
     BUILTIN
         .iter()
+        .chain(EMULATOR_PRESETS)
         .find(|b| b.0 == name)
-        .map(|b| b.1.to_string())
-        .ok_or(format!("unknown preset '{name}' (see: xidpipe list)"))
+        .map(|b| b.1)
 }
 
 pub fn load_preset(name: &str) -> Result<Preset, String> {
@@ -171,7 +183,7 @@ pub fn load_preset(name: &str) -> Result<Preset, String> {
 }
 
 pub fn is_builtin(name: &str) -> bool {
-    BUILTIN.iter().any(|b| b.0 == name)
+    builtin_text(name).is_some()
 }
 
 fn check_name(name: &str) -> Result<(), String> {
@@ -230,6 +242,8 @@ pub fn saved_presets() -> Vec<String> {
 
 fn list() -> Result<(), String> {
     println!("built-in: {}", BUILTIN.map(|b| b.0).join(", "));
+    let optional: Vec<_> = EMULATOR_PRESETS.iter().map(|p| p.0).collect();
+    println!("optional emulator presets: {}", optional.join(", "));
     let saved = saved_presets();
     let dir = preset_dir().map_or("?".into(), |d| d.display().to_string());
     let names = if saved.is_empty() {

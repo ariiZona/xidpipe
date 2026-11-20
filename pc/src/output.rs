@@ -18,15 +18,46 @@ impl Output for Null {
     }
 }
 
+struct PressurePads {
+    main: Box<dyn Output>,
+    axes: Box<dyn Output>,
+}
+
+fn pressure_axes([a, b, x, y, lb, rb]: [u8; 6]) -> Out {
+    let right = |v: u8| (u32::from(v) * 32767).div_ceil(255) as i16;
+    // SDL flips Y with a bitwise complement, so XInput's center reads as -1 (up).
+    // Use down for pressure: both APIs then see zero pressure at rest.
+    let down = |v| if v == 0 { 0 } else { !right(v) };
+    Out {
+        sticks: [right(a), down(b), right(x), down(y)],
+        lt: lb,
+        rt: rb,
+        ..Out::default()
+    }
+}
+
+impl Output for PressurePads {
+    fn send(&mut self, o: &Out) -> Result<(), String> {
+        let main = self.main.send(o);
+        let axes = self.axes.send(&pressure_axes(o.face_pressure));
+        main.and(axes)
+    }
+}
+
 /// Create the virtual controller for Xbox pad `pad` (1-12).
 pub fn open(p: &Profile, pad: u8, rumble: &Arc<Rumble>) -> Result<Box<dyn Output>, String> {
     match p.backend {
         Backend::None => Ok(Box::new(Null)),
+        Backend::Pressure => Ok(Box::new(PressurePads {
+            main: imp::open(Backend::Xinput, pad, Some(rumble.clone()))?,
+            axes: imp::open(Backend::Xinput, pad, None)
+                .map_err(|e| format!("couldn't open the second pad for button pressure: {e}"))?,
+        })),
         #[cfg(windows)]
         Backend::Vjoy => crate::vjoy::open(p, pad),
         #[cfg(not(windows))]
         Backend::Vjoy => Err(format!("pad {pad}: vJoy is Windows-only")),
-        b => imp::open(b, pad, rumble.clone()),
+        b => imp::open(b, pad, Some(rumble.clone())),
     }
 }
 
@@ -51,7 +82,11 @@ mod imp {
 
     const VIGEM_HELP: &str = "is ViGEmBus installed? https://github.com/nefarius/ViGEmBus/releases";
 
-    pub fn open(b: Backend, pad: u8, rumble: Arc<Rumble>) -> Result<Box<dyn Output>, String> {
+    pub fn open(
+        b: Backend,
+        pad: u8,
+        rumble: Option<Arc<Rumble>>,
+    ) -> Result<Box<dyn Output>, String> {
         let client = Client::connect().map_err(|e| format!("ViGEmBus: {e:?} ({VIGEM_HELP})"))?;
         if b == Backend::Dinput {
             let mut t = DualShock4Wired::new(client, TargetId::DUALSHOCK4_WIRED);
@@ -66,14 +101,16 @@ mod imp {
             .map_err(|e| format!("ViGEm X360: {e:?}"))?;
         // Rumble goes to the Xbox straight from this thread. It ends by itself when the target
         // is unplugged (dropped).
-        t.request_notification()
-            .map_err(|e| format!("ViGEm X360 rumble: {e:?}"))?
-            .spawn_thread(move |_, n| {
-                rumble.set(
-                    pad,
-                    (n.large_motor as u16 * 257, n.small_motor as u16 * 257),
-                );
-            });
+        if let Some(rumble) = rumble {
+            t.request_notification()
+                .map_err(|e| format!("ViGEm X360 rumble: {e:?}"))?
+                .spawn_thread(move |_, n| {
+                    rumble.set(
+                        pad,
+                        (n.large_motor as u16 * 257, n.small_motor as u16 * 257),
+                    );
+                });
+        }
         Ok(Box::new(X360 { t }))
     }
 
@@ -253,8 +290,13 @@ mod imp {
         (0x0080, KeyCode::BTN_THUMBR),
     ];
 
-    pub fn open(b: Backend, pad: u8, rumble: Arc<Rumble>) -> Result<Box<dyn Output>, String> {
+    pub fn open(
+        b: Backend,
+        pad: u8,
+        rumble: Option<Arc<Rumble>>,
+    ) -> Result<Box<dyn Output>, String> {
         let (vid, pid, name) = match b {
+            Backend::Xinput if rumble.is_none() => (0x045e, 0x028e, "xidpipe button pressure"),
             Backend::Xinput => (0x045e, 0x028e, "Microsoft X-Box 360 pad (xidpipe)"),
             _ => (0x0000, 0x0000, "xidpipe pad"),
         };
@@ -278,9 +320,12 @@ mod imp {
             let mut d = VirtualDevice::builder()?
                 .name(name)
                 .input_id(InputId::new(BusType::BUS_USB, vid, pid, 0x0110))
-                .with_keys(&keys)?
-                .with_ff(&AttributeSet::from_iter([FFEffectCode::FF_RUMBLE]))?
-                .with_ff_effects_max(16);
+                .with_keys(&keys)?;
+            if rumble.is_some() {
+                d = d
+                    .with_ff(&AttributeSet::from_iter([FFEffectCode::FF_RUMBLE]))?
+                    .with_ff_effects_max(16);
+            }
             for (code, info) in axes {
                 d = d.with_absolute_axis(&UinputAbsSetup::new(code, info))?;
             }
@@ -300,11 +345,13 @@ mod imp {
         })?;
         let fd = dev.as_raw_fd();
         let dev = Arc::new(Mutex::new(dev));
-        let weak = Arc::downgrade(&dev);
-        std::thread::Builder::new()
-            .name(format!("rumble-{pad}"))
-            .spawn(move || rumble_thread(weak, fd, pad, rumble))
-            .map_err(|e| e.to_string())?;
+        if let Some(rumble) = rumble {
+            let weak = Arc::downgrade(&dev);
+            std::thread::Builder::new()
+                .name(format!("rumble-{pad}"))
+                .spawn(move || rumble_thread(weak, fd, pad, rumble))
+                .map_err(|e| e.to_string())?;
+        }
         Ok(Box::new(Uinput(dev)))
     }
 
@@ -396,9 +443,24 @@ mod imp {
 #[cfg(not(any(windows, target_os = "linux")))]
 mod imp {
     use super::*;
-    pub fn open(_: Backend, _: u8, _: Arc<Rumble>) -> Result<Box<dyn Output>, String> {
+    pub fn open(_: Backend, _: u8, _: Option<Arc<Rumble>>) -> Result<Box<dyn Output>, String> {
         Err("no virtual controller support on this OS yet; use backend = \"none\"".into())
     }
+}
+
+#[test]
+fn pressure_axes_keep_all_256_levels() {
+    for v in 0..=255 {
+        let o = pressure_axes([v, 255 - v, 0, 255, v, 255 - v]);
+        let [lx, ly, rx, ry] = o.sticks;
+        let sdl = [lx, !ly, rx, !ry];
+        let decoded = sdl.map(|s| (i32::from(s.max(0)) * 255 / 32767) as u8);
+        assert_eq!(decoded, [v, 255 - v, 0, 255]);
+        assert_eq!(sdl[1] > 0, v != 255);
+        assert_eq!((-i32::from(ly) * 255 / 32768) as u8, 255 - v);
+        assert_eq!((o.lt, o.rt), (v, 255 - v));
+    }
+    assert_eq!(pressure_axes([0; 6]), Out::default());
 }
 
 #[test]

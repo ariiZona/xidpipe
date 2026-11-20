@@ -46,7 +46,8 @@
 #define PEER_TIMEOUT_MS 3000
 #define RETRY_MS 500
 #define RUMBLE_TIMEOUT_MS 1000 // the PC resends every 250 ms
-#define RUMBLE_RETRY_MS 250    // a failed rumble write is sent again after this
+#define RUMBLE_RESEND_MS 250   // the motors are rewritten this often, so a lost or ignored "off" can't stick
+#define RUMBLE_STUCK_MS 100    // a write still unfinished after this is aborted (a pad can NAK it forever)
 #define AUTO_MAX_INTERVAL_MS 8 // "auto" polling never goes below 125 Hz
 #define XID_CLASS 0x58
 
@@ -69,8 +70,8 @@ typedef struct {
     DWORD sent_at, failed_at, info_at;
     UTR_T *out_utr;           // rumble writes; NULL if the pad has no OUT endpoint
     volatile uint8_t out_busy;
-    volatile uint8_t out_failed; // the last rumble write failed (set by the DPC or the main loop)
-    DWORD out_failed_at;
+    volatile uint8_t out_failed; // the last rumble write failed or was aborted (set by the DPC)
+    DWORD out_at;             // when the last rumble write was started
     uint16_t rumble_sent[2];
 } pad_t;
 
@@ -413,7 +414,7 @@ static void on_report(UTR_T *utr)
     KeSetEvent(&wake, 1, FALSE);
 }
 
-// Runs in the USB DPC when a rumble write finished or failed (update_rumble retries failures).
+// Runs in the USB DPC when a rumble write finished, failed or was aborted (update_rumble resends).
 static void on_rumble_done(UTR_T *utr)
 {
     pad_t *p = (pad_t *)utr->context;
@@ -426,15 +427,22 @@ static void on_rumble_done(UTR_T *utr)
 
 static void update_rumble(pad_t *p, const uint16_t want[2], DWORD now)
 {
-    if (p->out_utr == NULL || p->out_busy) {
+    if (p->out_utr == NULL) {
         return;
     }
-    if (p->out_failed && p->out_failed_at == 0) {
-        p->out_failed_at = now ? now : 1; // failed in the DPC
+    if (p->out_busy) {
+        // A write that never completes would block every later one, "motors off" included.
+        // Aborting it runs on_rumble_done, which frees the slot for the next loop.
+        if (now - p->out_at >= RUMBLE_STUCK_MS) {
+            usbh_quit_utr(p->out_utr);
+            p->out_at = now;
+        }
+        return;
     }
-    // A failed write is resent, so a lost "motors off" can't leave them running.
-    int retry = p->out_failed && now - p->out_failed_at >= RUMBLE_RETRY_MS;
-    if (!retry && want[0] == p->rumble_sent[0] && want[1] == p->rumble_sent[1]) {
+    // Resent even when unchanged: a failed write, or one a pad ignored, mustn't leave the motors running.
+    int resend = (p->out_failed || p->rumble_sent[0] || p->rumble_sent[1] || want[0] || want[1]) &&
+                 now - p->out_at >= RUMBLE_RESEND_MS;
+    if (!resend && want[0] == p->rumble_sent[0] && want[1] == p->rumble_sent[1]) {
         return;
     }
     // XID rumble report: id 0, length 6, left u16, right u16
@@ -452,12 +460,11 @@ static void update_rumble(pad_t *p, const uint16_t want[2], DWORD now)
     p->rumble_sent[0] = want[0];
     p->rumble_sent[1] = want[1];
     p->out_failed = 0;
-    p->out_failed_at = 0;
+    p->out_at = now;
     p->out_busy = 1;
     if (usbh_int_xfer(p->out_utr) != USBH_OK) {
         p->out_busy = 0;
-        p->out_failed = 1; // retried every RUMBLE_RETRY_MS, not every loop
-        p->out_failed_at = now ? now : 1;
+        p->out_failed = 1; // resent after RUMBLE_RESEND_MS, not every loop
     }
 }
 

@@ -1,0 +1,4 @@
+# Xbox 360 pad plus six independent pressure axes for emulators.
+backend = "pressure"
+pressure = true
+analog_deadzone = 0

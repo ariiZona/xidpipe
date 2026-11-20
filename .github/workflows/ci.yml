@@ -87,9 +87,12 @@ jobs:
           v="$GITHUB_REF_NAME"
           mkdir out
           cp README.md LICENSE dist/xidpipe-Windows/
-          (cd dist/xidpipe-Windows && zip -9 "../../out/xidpipe-$v-windows-x64.zip" xidpipe.exe README.md LICENSE)
+          cp -r pcsx2 dist/xidpipe-Windows/
+          (cd dist/xidpipe-Windows && zip -9 "../../out/xidpipe-$v-windows-x64.zip" xidpipe.exe README.md LICENSE pcsx2/*.ini)
           cp README.md LICENSE dist/xidpipe-Linux/ && chmod +x dist/xidpipe-Linux/xidpipe
-          tar -C dist/xidpipe-Linux -czf "out/xidpipe-$v-linux-x64.tar.gz" xidpipe README.md LICENSE
+          mkdir -p dist/xidpipe-Linux/pcsx2
+          cp pcsx2/xidpipe-two-pads.ini dist/xidpipe-Linux/pcsx2/
+          tar -C dist/xidpipe-Linux -czf "out/xidpipe-$v-linux-x64.tar.gz" xidpipe README.md LICENSE pcsx2
           (cd dist/xidpipe-xbox && zip -9 -j "../../out/xidpipe-$v-xbox.zip" bin/default.xbe xidpipe.iso)
           # The Xbox app's update check downloads this file by this exact name.
           cp dist/xidpipe-xbox/bin/default.xbe "out/xidpipe-$v-default.xbe"

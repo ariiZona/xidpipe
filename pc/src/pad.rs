@@ -39,20 +39,24 @@ pub struct Out {
     pub sticks: [i16; 4],
     /// Extra analog outputs sl0, sl1 (0-255). Only vJoy has axes for them (Slider, Dial).
     pub sliders: [u8; 2],
+    /// A, B, X, Y, LB, RB on the pressure backend's second virtual pad.
+    pub face_pressure: [u8; 6],
 }
 
 #[derive(Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "lowercase")]
 pub enum Backend {
     Xinput,
+    Pressure,
     Dinput,
     Vjoy,
     None,
 }
 
 impl Backend {
-    pub const ALL: [Backend; 4] = [
+    pub const ALL: [Backend; 5] = [
         Backend::Xinput,
+        Backend::Pressure,
         Backend::Dinput,
         Backend::Vjoy,
         Backend::None,
@@ -109,6 +113,7 @@ enum Src {
 #[derive(Clone, Copy, Debug)]
 enum Target {
     Button(u16),
+    Face(usize, u16),
     Trigger(usize),
     Axis(usize),
 }
@@ -143,12 +148,12 @@ fn src(name: &str) -> Option<Src> {
 
 /// (output name, output kind, default source)
 const TARGETS: &[(&str, Target, &str)] = &[
-    ("a", Target::Button(0x1000), "a"),
-    ("b", Target::Button(0x2000), "b"),
-    ("x", Target::Button(0x4000), "x"),
-    ("y", Target::Button(0x8000), "y"),
-    ("lb", Target::Button(0x0100), "white"),
-    ("rb", Target::Button(0x0200), "black"),
+    ("a", Target::Face(0, 0x1000), "a"),
+    ("b", Target::Face(1, 0x2000), "b"),
+    ("x", Target::Face(2, 0x4000), "x"),
+    ("y", Target::Face(3, 0x8000), "y"),
+    ("lb", Target::Face(4, 0x0100), "white"),
+    ("rb", Target::Face(5, 0x0200), "black"),
     ("back", Target::Button(0x0020), "back"),
     ("start", Target::Button(0x0010), "start"),
     ("ls", Target::Button(0x0040), "ls"),
@@ -260,10 +265,16 @@ impl Profile {
         let mut o = Out::default();
         for &(t, s) in &self.map {
             match t {
-                Target::Button(bit) if self.pressed(x, s) => o.buttons |= bit,
-                Target::Button(_) => {}
+                Target::Face(i, _) if self.backend == Backend::Pressure => {
+                    o.face_pressure[i] = self.level(x, s, true);
+                }
+                Target::Face(_, bit) | Target::Button(bit) => {
+                    if self.pressed(x, s) {
+                        o.buttons |= bit;
+                    }
+                }
                 Target::Trigger(i) => {
-                    let v = self.level(x, s);
+                    let v = self.level(x, s, self.pressure);
                     match i {
                         0 => o.lt = v,
                         1 => o.rt = v,
@@ -285,10 +296,10 @@ impl Profile {
         }
     }
 
-    /// Analog view of a source (0-255). Face buttons only give pressure when `pressure` is on.
-    fn level(&self, x: &Xid, s: Src) -> u8 {
+    /// Analog view of a source (0-255). Physical triggers always supply pressure.
+    fn level(&self, x: &Xid, s: Src, pressure: bool) -> u8 {
         match s {
-            Src::Analog(i) if i >= 6 || self.pressure => dz8(x.analog[i], self.analog_dz),
+            Src::Analog(i) if i >= 6 || pressure => dz8(x.analog[i], self.analog_dz),
             _ if self.pressed(x, s) => 255,
             _ => 0,
         }
@@ -414,7 +425,7 @@ mod tests {
 
     #[test]
     fn builtin_presets_load() {
-        for p in crate::BUILTIN {
+        for p in crate::BUILTIN.iter().chain(crate::EMULATOR_PRESETS) {
             Profile::new(&toml::from_str(p.1).unwrap()).unwrap();
         }
         // Every setting in xbox.toml equals the default. Its map only spells out default mappings.
@@ -469,6 +480,21 @@ analog_deadzone = 0
 map = { sl1 = \"a\" }",
         );
         assert_eq!(on_slider.apply(&x).sliders, [0, 128]);
+    }
+
+    #[test]
+    fn pcsx2_preserves_simultaneous_pressures_and_main_pad_inputs() {
+        let p = preset(include_str!("../presets/pcsx2.toml"));
+        let x = parse(&report(
+            0x11,
+            [1, 64, 128, 255, 80, 99, 12, 200],
+            [32767, 0, 0, -32768],
+        ));
+        let out = p.apply(&x);
+        assert_eq!(out.face_pressure, [1, 64, 128, 255, 99, 80]);
+        assert_eq!((out.buttons, out.lt, out.rt), (0x11, 12, 200));
+        assert_eq!(out.sticks, [32767, 0, 0, -32767]);
+        assert_eq!(p.apply(&Xid::default()), Out::default());
     }
 
     #[test]

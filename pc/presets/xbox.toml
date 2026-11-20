@@ -5,11 +5,12 @@
 #   "xinput" - Xbox 360 controller (Windows: ViGEmBus, Linux: uinput)
 #   "dinput" - Windows: DualShock 4 via ViGEmBus; Linux: generic (non-XInput) uinput pad
 #   "vjoy"   - Windows: vJoy DirectInput device, with two extra axes (sl0, sl1)
+#   "pressure" - main Xbox 360 pad plus a second pad carrying six pressure axes (see pcsx2.toml)
 #   "none"   - no virtual controller (use with --monitor)
 backend = "xinput"
 
 # true: A B X Y Black White send their pressure (0-255) when mapped to lt/rt/sl0/sl1.
-# false: they are plain on/off buttons everywhere.
+# false: they are on/off when mapped to those outputs. The pressure backend's six axes are always analog.
 pressure = false
 
 # Raw pressure (0-255) at which an analog button counts as pressed for a digital output.
