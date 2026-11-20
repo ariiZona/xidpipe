@@ -37,7 +37,7 @@ Two programs that talk over UDP:
 | `pc/build.rs` | Windows version resource for `xidpipe.exe` (fixed public values only) |
 | `pc/presets/*.toml` | built-in presets (`xbox` documents every setting) |
 | `.github/workflows/ci.yml` | CI on GitHub: `v*` tags (which also publish the GitHub release), pull requests, or by hand ("Run workflow") |
-| `.forgejo/workflows/ci.yml` | the same checks on Forgejo Actions, minus Windows and the release. Forgejo reads only this folder once it exists |
+| `.forgejo/workflows/ci.yml` | the same checks on Forgejo Actions (Linux only) and a Forgejo release on `v*` tags. Forgejo reads only this folder once it exists |
 
 ## Build and check
 

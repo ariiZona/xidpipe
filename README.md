@@ -443,8 +443,11 @@ release with those builds attached, with notes from that version's section in [C
 Pull requests are checked too (without releasing). To check a branch by hand, use **Run workflow** on the Actions page. The release
 includes `xidpipe-vX.Y.Z-default.xbe` on its own: that's the file installed Xbox apps download to update.
 [`.forgejo/workflows/ci.yml`](.forgejo/workflows/ci.yml) runs the same checks and Xbox build on Forgejo
-Actions, on Linux only and without the release step. Forgejo reads only one workflow folder, and
-`.forgejo/workflows` wins over `.github/workflows`, so GitHub is unaffected.
+Actions (Linux only, no Windows runner there) and, on a version tag, publishes a Forgejo release with the
+Linux and Xbox builds and the same notes. It needs a `RELEASE_TOKEN` repository secret (a token with write
+access to the repository) under **Settings → Actions → Secrets**; that release has no Windows zip until
+someone adds a Windows runner. Forgejo reads only one workflow folder, and `.forgejo/workflows` wins over
+`.github/workflows`, so GitHub is unaffected.
 
 ## Not done yet
 

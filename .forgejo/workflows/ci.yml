@@ -43,3 +43,61 @@ jobs:
       - name: Build
         working-directory: xbox
         run: nxdk/bin/activate make -j"$(nproc)"
+
+  # Pushing a tag like v0.2.6 publishes a Forgejo release with the Linux and Xbox builds attached and the
+  # matching CHANGELOG.md section as notes. Needs a RELEASE_TOKEN repository secret (Settings -> Actions ->
+  # Secrets: a token with write access to the repository). It rebuilds rather than passing artifacts on, so
+  # the release job never depends on Forgejo's artifact support. No Windows build (Linux-only runner).
+  release:
+    name: Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [pc, xbox]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
+      - name: Install build and upload prerequisites
+        run: sudo apt-get update && sudo apt-get install -y clang lld llvm bison flex cmake make curl jq zip
+      - name: Check the tag matches the version in pc/Cargo.toml
+        run: |
+          version=$(grep -m1 '^version' pc/Cargo.toml | cut -d'"' -f2)
+          test "v$version" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME but Cargo.toml says $version"; exit 1; }
+      - name: Build
+        run: |
+          (cd pc && cargo build --locked --release)
+          (cd xbox && nxdk/bin/activate make -j"$(nproc)")
+      - name: Package
+        run: |
+          v="$GITHUB_REF_NAME"
+          mkdir -p out pkg/pcsx2
+          cp pc/target/release/xidpipe README.md LICENSE pkg/
+          cp pcsx2/xidpipe-two-pads.ini pkg/pcsx2/
+          tar -C pkg -czf "out/xidpipe-$v-linux-x64.tar.gz" xidpipe README.md LICENSE pcsx2
+          zip -9 -j "out/xidpipe-$v-xbox.zip" xbox/bin/default.xbe xbox/xidpipe.iso
+          # The Xbox app's update check downloads this file by this exact name.
+          cp xbox/bin/default.xbe "out/xidpipe-$v-default.xbe"
+          ls -l out
+      - name: Release notes from CHANGELOG.md
+        run: |
+          awk -v h="## $GITHUB_REF_NAME" '$0 == h {f = 1; next} /^## / {f = 0} f' CHANGELOG.md > notes.md
+          test -s notes.md || { echo "CHANGELOG.md has no '## $GITHUB_REF_NAME' section"; exit 1; }
+      - name: Publish
+        env:
+          TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          API: ${{ github.server_url }}/api/v1/repos/${{ github.repository }}
+        run: |
+          v="$GITHUB_REF_NAME"
+          # Reuse the release if a previous attempt already made it, so a re-run only re-uploads the files.
+          id=$(curl -sS -H "Authorization: token $TOKEN" "$API/releases/tags/$v" | jq -r '.id // empty')
+          if [ -z "$id" ]; then
+            id=$(jq -n --arg t "$v" --arg n "xidpipe $v" --rawfile b notes.md '{tag_name: $t, name: $n, body: $b}' |
+              curl -fsS -X POST -H "Authorization: token $TOKEN" -H 'Content-Type: application/json' \
+                --data-binary @- "$API/releases" | jq -r '.id // empty')
+            test -n "$id" || { echo "could not create the release"; exit 1; }
+          fi
+          for f in out/*; do
+            curl -fsS -X POST -H "Authorization: token $TOKEN" -F "attachment=@$f" \
+              "$API/releases/$id/assets?name=$(basename "$f")"
+          done

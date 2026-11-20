@@ -2,6 +2,16 @@
 
 Each release's notes on GitHub are taken from its section here.
 
+## v0.2.6
+
+- CI: Forgejo builds and tests the PC app and builds the Xbox app from `.forgejo/workflows/ci.yml`, on
+  Linux only (no Windows runner there). GitHub keeps `.github/workflows/ci.yml`. Forgejo reads only one
+  workflow folder, and `.forgejo/workflows` comes before `.github/workflows`.
+- Release: a `v*` tag pushed to Forgejo now also publishes a Forgejo release with the Linux and Xbox
+  builds and this section as notes. It needs a `RELEASE_TOKEN` repository secret. That release has no
+  Windows build, which needs a Windows runner.
+- No changes to either app: this release exists to test the Forgejo pipeline.
+
 ## v0.2.5
 
 - Xbox: fixed rumble that could keep running until the controller was replugged, even after closing
