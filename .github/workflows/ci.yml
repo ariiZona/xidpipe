@@ -1,5 +1,5 @@
-# Runs on GitHub Actions and on Forgejo/Gitea Actions (they read .github/workflows too).
-# On Forgejo, the Windows job needs a Windows runner.
+# GitHub Actions. Forgejo runs .forgejo/workflows/ci.yml instead: it reads only the first workflow folder
+# it finds, and .forgejo/workflows comes before .github/workflows.
 name: CI
 
 # Version tags and pull requests run it (plain pushes don't: a commit pushed together with its tag
@@ -65,7 +65,7 @@ jobs:
           if-no-files-found: error
 
   # Pushing a tag like v0.1.0 publishes a GitHub release with the builds above attached and
-  # the matching CHANGELOG.md section as notes. GitHub only: Forgejo skips this job.
+  # the matching CHANGELOG.md section as notes. GitHub only (gh release needs GitHub's API).
   release:
     name: Release
     if: startsWith(github.ref, 'refs/tags/v') && github.server_url == 'https://github.com'

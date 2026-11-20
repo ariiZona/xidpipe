@@ -442,8 +442,9 @@ and builds the Xbox `.xbe`/`.iso`, then uploads the builds as artifacts. It runs
 release with those builds attached, with notes from that version's section in [CHANGELOG.md](CHANGELOG.md).
 Pull requests are checked too (without releasing). To check a branch by hand, use **Run workflow** on the Actions page. The release
 includes `xidpipe-vX.Y.Z-default.xbe` on its own: that's the file installed Xbox apps download to update.
-The workflow also runs on Forgejo/Gitea Actions (minus the release step). There, the Windows job
-needs a Windows runner.
+[`.forgejo/workflows/ci.yml`](.forgejo/workflows/ci.yml) runs the same checks and Xbox build on Forgejo
+Actions, on Linux only and without the release step. Forgejo reads only one workflow folder, and
+`.forgejo/workflows` wins over `.github/workflows`, so GitHub is unaffected.
 
 ## Not done yet
 

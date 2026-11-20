@@ -1,0 +1,45 @@
+# Forgejo Actions. Forgejo reads only the first workflow folder it finds, and .forgejo/workflows comes
+# before .github/workflows, so this is the file that runs there; GitHub runs .github/workflows/ci.yml.
+# The Forgejo runner here has no Windows runner, so the PC app is built and tested on Linux only.
+name: CI
+
+# Version tags and pull requests run it (plain pushes don't: a commit pushed together with its tag
+# would otherwise run twice). "Run workflow" on the Actions page starts it by hand for any branch.
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  pc:
+    name: PC app
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: pc
+    steps:
+      - uses: actions/checkout@v7
+      # data.forgejo.org mirrors only actions/*, so other actions need their full URL.
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+      - run: cargo build --locked --release
+
+  xbox:
+    name: Xbox app
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: Install nxdk prerequisites
+        run: sudo apt-get update && sudo apt-get install -y clang lld llvm bison flex cmake make
+      - name: Unit tests (FTP paths, HTTP and update-check parsing)
+        run: cc -std=c11 -Wall -Wextra -Werror -o util_test xbox/tests/util_test.c xbox/util.c && ./util_test
+      - name: Build
+        working-directory: xbox
+        run: nxdk/bin/activate make -j"$(nproc)"
